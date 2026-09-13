@@ -53,6 +53,35 @@ def mcnemar_p_vectorized(n_only_asd: np.ndarray, n_only_ctrl: np.ndarray) -> np.
     return p
 
 
+STAT_COLUMNS = [
+    "a_all",
+    "b_all",
+    "c_all",
+    "d_all",
+    "or_all",
+    "fisher_p_all",
+    "fisher_log10p_all",
+    "a_male",
+    "b_male",
+    "c_male",
+    "d_male",
+    "or_male",
+    "fisher_p_male",
+    "fisher_log10p_male",
+    "a_female",
+    "b_female",
+    "c_female",
+    "d_female",
+    "or_female",
+    "fisher_p_female",
+    "fisher_log10p_female",
+    "n_only_asd",
+    "n_only_ctrl",
+    "mcnemar_p",
+    "mcnemar_log10p",
+]
+
+
 def add_stats(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     for stratum in STRATA:
@@ -68,37 +97,5 @@ def add_stats(frame: pd.DataFrame) -> pd.DataFrame:
         out["n_only_asd"].to_numpy(), out["n_only_ctrl"].to_numpy()
     )
     out["mcnemar_log10p"] = neglog10(out["mcnemar_p"].to_numpy())
-    return out[
-        [
-            "CHROM",
-            "POS",
-            "REF",
-            "ALT",
-            "key",
-            "a_all",
-            "b_all",
-            "c_all",
-            "d_all",
-            "or_all",
-            "fisher_p_all",
-            "fisher_log10p_all",
-            "a_male",
-            "b_male",
-            "c_male",
-            "d_male",
-            "or_male",
-            "fisher_p_male",
-            "fisher_log10p_male",
-            "a_female",
-            "b_female",
-            "c_female",
-            "d_female",
-            "or_female",
-            "fisher_p_female",
-            "fisher_log10p_female",
-            "n_only_asd",
-            "n_only_ctrl",
-            "mcnemar_p",
-            "mcnemar_log10p",
-        ]
-    ]
+    lead = [col for col in out.columns if col not in STAT_COLUMNS]
+    return out[lead + STAT_COLUMNS]

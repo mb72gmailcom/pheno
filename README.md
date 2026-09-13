@@ -29,6 +29,22 @@ pheno-asd \
 
 `--column-map` is optional if the family file already uses the default column names (`person`, `family`, `mother`, `father`, `sex`, `asd`).
 
+Gene-level burden (separate command): union of carriers for every rare variant whose `POS` falls in a GTF gene plus strand-aware flanks, then the same Fisher / McNemar tests. One output row per gene that has at least one overlapping variant. Default flanks are 5 kb upstream of the TSS and 1 kb downstream of the TES; default biotype is `protein_coding`.
+
+```bash
+pheno-asd-gene \
+  --family-file family.tsv \
+  --idir /path/to/chr21 \
+  --file-pattern inherited \
+  --gtf ~/resources/annotations_by_chrm/chr21/chr21.gencode.v47.basic.annotation.gtf \
+  --column-map examples/column_map.json \
+  --upstream 5000 \
+  --downstream 1000 \
+  --output chr21.genes.tsv
+```
+
+Use `--all-gene-types` to keep every GTF `gene` feature, or `--gene-types protein_coding,lncRNA` to choose types.
+
 ## Family file
 
 TSV with one row per person. A **child** is anyone with both parents defined (IDs not `0`, `false`, `-`, or empty) and a known ASD status. Missing ASD excludes the person. Missing sex keeps them in the `*_all` columns only.
@@ -54,7 +70,7 @@ chr21   7927704  .  C  A  SP0155907;SP0294915
 
 ## Output columns
 
-Each row is one variant, keyed by `chr_pos_ref_alt`.
+`pheno-asd` writes one row per variant, keyed by `chr_pos_ref_alt`. `pheno-asd-gene` writes one row per gene (`gene_id`, `gene_name`, `n_variants`, locus and flank coordinates) and the same count / p-value columns. A child is a gene carrier if they carry **any** overlapping variant (union of `PATIENTS`, each person once).
 
 For each stratum (`all`, `male`, `female`):
 

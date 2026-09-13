@@ -16,6 +16,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 pheno-asd = "pheno.cli:main"
+pheno-asd-gene = "pheno.cli_gene:main"
 
 [build-system]
 requires = ["setuptools>=68"]

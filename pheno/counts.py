@@ -53,27 +53,17 @@ def _normalize_variant_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return renamed
 
 
-def count_variants(frame: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
-    """Count unique child carriers per variant; one output row per input row."""
-    frame = _normalize_variant_columns(frame)
-    n_var = len(frame)
-    base = pd.DataFrame(
-        {
-            "CHROM": frame["CHROM"].astype(str).to_numpy(),
-            "POS": frame["POS"].astype(str).to_numpy(),
-            "REF": frame["REF"].astype(str).to_numpy(),
-            "ALT": frame["ALT"].astype(str).to_numpy(),
-            "vid": np.arange(n_var, dtype=np.int64),
-        }
-    )
-    base["key"] = base["CHROM"] + "_" + base["POS"] + "_" + base["REF"] + "_" + base["ALT"]
-
+def counts_from_patient_lists(
+    base: pd.DataFrame, patients: pd.Series, cohort: Cohort
+) -> pd.DataFrame:
+    """Count unique child carriers per row of `base`; rows align with `patients`."""
     empty = _empty_counts(base, cohort)
-    if n_var == 0:
+    if len(base) == 0:
         return empty
 
-    patients = frame["PATIENTS"].fillna("").astype(str)
-    exploded = base.assign(person=patients.str.split(";")).explode("person", ignore_index=True)
+    exploded = base.assign(person=patients.fillna("").astype(str).str.split(";")).explode(
+        "person", ignore_index=True
+    )
     exploded["person"] = exploded["person"].str.strip()
     exploded = exploded[exploded["person"].ne("")]
     exploded["idx"] = exploded["person"].map(cohort.person_to_idx)
@@ -130,13 +120,37 @@ def count_variants(frame: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
     out = out.join(only_asd).join(only_ctrl)
     out["n_only_asd"] = out["n_only_asd"].fillna(0).astype(np.int64)
     out["n_only_ctrl"] = out["n_only_ctrl"].fillna(0).astype(np.int64)
-    return out.reset_index(drop=True)[
-        ["CHROM", "POS", "REF", "ALT", "key", *COUNT_COLUMNS]
+    drop_helper = [
+        "is_asd",
+        "is_ctrl",
+        "is_male_asd",
+        "is_male_ctrl",
+        "is_female_asd",
+        "is_female_ctrl",
     ]
+    return out.drop(columns=[c for c in drop_helper if c in out.columns]).reset_index(drop=True)
+
+
+def count_variants(frame: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
+    """Count unique child carriers per variant; one output row per input row."""
+    frame = _normalize_variant_columns(frame)
+    n_var = len(frame)
+    base = pd.DataFrame(
+        {
+            "CHROM": frame["CHROM"].astype(str).to_numpy(),
+            "POS": frame["POS"].astype(str).to_numpy(),
+            "REF": frame["REF"].astype(str).to_numpy(),
+            "ALT": frame["ALT"].astype(str).to_numpy(),
+            "vid": np.arange(n_var, dtype=np.int64),
+        }
+    )
+    base["key"] = base["CHROM"] + "_" + base["POS"] + "_" + base["REF"] + "_" + base["ALT"]
+    out = counts_from_patient_lists(base, frame["PATIENTS"], cohort)
+    return out[["CHROM", "POS", "REF", "ALT", "key", *COUNT_COLUMNS]]
 
 
 def _empty_counts(base: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
-    out = base.drop(columns=["vid"]).copy()
+    out = base.drop(columns=["vid"]).copy() if "vid" in base.columns else base.copy()
     zeros = {
         "a_all": 0,
         "b_all": 0,
@@ -155,7 +169,7 @@ def _empty_counts(base: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
     }
     for name, value in zeros.items():
         out[name] = np.int64(value)
-    return out[["CHROM", "POS", "REF", "ALT", "key", *COUNT_COLUMNS]]
+    return out
 
 
 def count_directory(idir: str | Path, file_pattern: str, cohort: Cohort) -> pd.DataFrame:
