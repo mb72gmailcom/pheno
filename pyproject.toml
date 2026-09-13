@@ -1,0 +1,28 @@
+[project]
+name = "pheno"
+version = "0.1.0"
+description = "ASD association counts for inherited variants in sequenced trios"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+pheno-asd = "pheno.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pheno*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

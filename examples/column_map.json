@@ -1,0 +1,20 @@
+{
+  "columns": {
+    "person": "person",
+    "family": "family",
+    "mother": "mother",
+    "father": "father",
+    "mother_sequenced": null,
+    "father_sequenced": null,
+    "sex": "sex",
+    "asd": "asd"
+  },
+  "values": {
+    "bad_ids": ["0", "false", "-", ""],
+    "sequenced_true": ["true", "1", "yes"],
+    "sex_male": ["male", "1"],
+    "sex_female": ["female", "2"],
+    "asd_affected": ["true", "2"],
+    "asd_unaffected": ["false", "1"]
+  }
+}
