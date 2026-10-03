@@ -15,26 +15,27 @@ def count_patient_variants(
 ) -> dict[str, dict[str, int]]:
     """Count rows of ``prefix`` in which each person appears.
 
-    Every person in ``status`` is included. People with no rows have count 0.
-    ``status`` maps a person id to ``asd`` or ``ctrl``.
+    Only people who appear in those TSVs and have a known ASD status are
+    included. ``status`` maps a person id to ``asd`` or ``ctrl``.
     """
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
     if not prefix:
         raise ValueError("file pattern must not be empty")
 
-    asd = {person: 0 for person, kind in status.items() if kind == "asd"}
-    unaffected = {person: 0 for person, kind in status.items() if kind == "ctrl"}
-    buckets = {person: asd for person in asd}
-    buckets.update({person: unaffected for person in unaffected})
+    asd: dict[str, int] = {}
+    unaffected: dict[str, int] = {}
+    buckets = {"asd": asd, "ctrl": unaffected}
 
     for chrom_dir in _chrom_dirs(input_dir):
         for path in _variant_files(chrom_dir, prefix):
             for _columns, patients in _iter_short_rows(path):
                 for person in set(patients):
-                    bucket = buckets.get(person)
-                    if bucket is not None:
-                        bucket[person] += 1
+                    kind = status.get(person)
+                    bucket = buckets.get(kind) if kind is not None else None
+                    if bucket is None:
+                        continue
+                    bucket[person] = bucket.get(person, 0) + 1
 
     return {
         "asd": dict(sorted(asd.items())),

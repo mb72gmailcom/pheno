@@ -22,7 +22,7 @@ def _write(path: Path, body: str) -> None:
     path.write_text(HEADER + body, encoding="utf-8")
 
 
-def test_counts_include_zeros_and_sum_chromosomes(tmp_path: Path):
+def test_counts_sum_people_present_in_tsvs(tmp_path: Path):
     source = tmp_path / "results"
     _write(
         source / "chr21" / "inherited_10000001_12500000.tsv",
@@ -41,7 +41,7 @@ def test_counts_include_zeros_and_sum_chromosomes(tmp_path: Path):
     )
 
     assert counts == {
-        "asd": {"A": 3, "C": 0},
+        "asd": {"A": 3},
         "unaffected": {"B": 1},
     }
 
@@ -73,6 +73,6 @@ def test_counts_cli_writes_json(tmp_path: Path):
     )
     assert rc == 0
     assert json.loads(output.read_text(encoding="utf-8")) == {
-        "asd": {"C": 1, "D": 0},
+        "asd": {"C": 1},
         "unaffected": {"B": 1},
     }

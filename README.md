@@ -58,7 +58,7 @@ pheno-asd-split \
 
 `--input-dir` is the parent of the `chrN` directories. For `chr21/inherited_10000001_12500000.tsv` the outputs are `inherited_asd_10000001_12500000.tsv`, `inherited_unaffected_10000001_12500000.tsv`, and `inherited_both_10000001_12500000.tsv` under `output-dir/chr21/`. The `PATIENTS` column keeps only the carriers who belong in that file.
 
-Count variants per patient. Every person with a known ASD status is included, and a person who carries none of the selected variants has count 0. Ids on a row that are missing from the family file, or have an unrecognized ASD value, are not counted.
+Count variants per patient. Only people who appear in the selected TSVs are included. Their ASD status comes from the family file. Ids missing from the family file, or with an unrecognized ASD value, are not counted.
 
 ```bash
 pheno-asd-counts \
