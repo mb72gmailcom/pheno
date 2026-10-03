@@ -19,6 +19,7 @@ pheno-asd = "pheno.cli:main"
 pheno-asd-gene = "pheno.cli_gene:main"
 pheno-asd-split = "pheno.cli_split:main"
 pheno-asd-counts = "pheno.cli_patient_counts:main"
+pheno-asd-burden = "pheno.cli_burden:main"
 
 [build-system]
 requires = ["setuptools>=68"]

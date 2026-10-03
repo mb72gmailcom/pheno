@@ -71,6 +71,22 @@ pheno-asd-counts \
 
 `--input-dir` is the parent of the `chrN` directories and must contain short-format TSVs with a `PATIENTS` column. The JSON object has two maps, `asd` and `unaffected`, from person id to the number of matching rows across all chromosomes.
 
+Per-person Otari burden. For each carried variant, transcript scores are made absolute unless `--no-abs` is set, then collapsed across transcripts. A scored variant is damaging when that collapsed score is greater than `--threshold`.
+
+```bash
+pheno-asd-burden \
+  --family-file family.tsv \
+  --input-dir /path/to/results \
+  --otari-dir /path/to/otari \
+  --file-pattern inherited \
+  --column-map examples/column_map.json \
+  --otari-columns max_effect,Brain \
+  --threshold 0.5 \
+  --output burden.json
+```
+
+Variant TSVs must be named `{prefix}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/{prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. The output is one JSON file. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
+
 ## Family file
 
 TSV with one row per person. A **child** is anyone with both parents defined (IDs not `0`, `false`, `-`, or empty) and a known ASD status. Missing ASD excludes the person. Missing sex keeps them in the `*_all` columns only.
