@@ -45,6 +45,19 @@ pheno-asd-gene \
 
 Use `--all-gene-types` to keep every GTF `gene` feature, or `--gene-types protein_coding,lncRNA` to choose types.
 
+Split each variant into one of three short-format TSVs. A row is `asd` when every remaining carrier is affected, `unaffected` when every remaining carrier is unaffected, and `both` when both groups are present. People missing from the family file, or with an unrecognized ASD value, are dropped before that decision. A class with no variants is not written.
+
+```bash
+pheno-asd-split \
+  --family-file family.tsv \
+  --input-dir /path/to/results \
+  --file-pattern inherited \
+  --column-map examples/column_map.json \
+  --output-dir /path/to/split
+```
+
+`--input-dir` is the parent of the `chrN` directories. For `chr21/inherited_10000001_12500000.tsv` the outputs are `inherited_asd_10000001_12500000.tsv`, `inherited_unaffected_10000001_12500000.tsv`, and `inherited_both_10000001_12500000.tsv` under `output-dir/chr21/`. The `PATIENTS` column keeps only the carriers who belong in that file.
+
 ## Family file
 
 TSV with one row per person. A **child** is anyone with both parents defined (IDs not `0`, `false`, `-`, or empty) and a known ASD status. Missing ASD excludes the person. Missing sex keeps them in the `*_all` columns only.

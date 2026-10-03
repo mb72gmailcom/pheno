@@ -175,7 +175,7 @@ def _empty_counts(base: pd.DataFrame, cohort: Cohort) -> pd.DataFrame:
 def count_directory(idir: str | Path, file_pattern: str, cohort: Cohort) -> pd.DataFrame:
     frames = []
     files = discover_files(idir, file_pattern)
-    logger.info("reading %s variant files from %s", len(files), idir)
+    logger.info("reading %s input TSV files from %s", len(files), idir)
     for path in files:
         logger.info("  %s", path.name)
         frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)

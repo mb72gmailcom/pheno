@@ -62,7 +62,7 @@ def aggregate_directory(
 ) -> pd.DataFrame:
     pair_frames: list[pd.DataFrame] = []
     files = discover_files(idir, file_pattern)
-    logger.info("aggregating %s variant files from %s", len(files), idir)
+    logger.info("aggregating %s input TSV files from %s", len(files), idir)
     for path in files:
         logger.info("  %s", path.name)
         variants = _read_variants(path)
