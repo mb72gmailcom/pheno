@@ -141,3 +141,66 @@ def test_burden_cli_no_abs(tmp_path: Path):
     assert brain["max_score"] == pytest.approx(0.1)
     assert brain["sum_effect"] == pytest.approx(-0.1)
     assert brain["n_damaging"] == 0
+    chromosome = json.loads((output.parent / "chr21" / "burden.json").read_text(encoding="utf-8"))
+    assert chromosome["patients"]["A"]["Brain"]["max_score"] == pytest.approx(0.1)
+
+
+def test_burden_sums_chromosomes(tmp_path: Path):
+    source, otari, family = _cohort(tmp_path)
+    _write(
+        source / "chr22" / "inherited_1_100.tsv",
+        HEADER + "chr22\t10\t.\tA\tG\tA;B\n" + "chr22\t11\t.\tT\tC\tC\n",
+    )
+    _write(
+        otari / "inherited" / "chr22" / "1_100" / "variant_effects_comprehensive.tsv",
+        OTARI_HEADER
+        + "22_10_A_G_hg38\tENST00000441009\t0.2\t0.2\t0.2\n"
+        + "22_11_T_C_hg38\tENST00000441009\t0.9\t0.9\t0.9\n",
+    )
+    output = tmp_path / "out" / "burden.json"
+    people = load_people(family, load_column_map(None))
+    payload = compute_burden(
+        source,
+        otari,
+        "inherited",
+        people,
+        ["max_effect"],
+        threshold=0.5,
+        use_abs=True,
+        transcripts="max",
+        output=output,
+    )
+
+    chr21 = json.loads((output.parent / "chr21" / "burden.json").read_text(encoding="utf-8"))
+    chr22 = json.loads((output.parent / "chr22" / "burden.json").read_text(encoding="utf-8"))
+    assert set(chr21["patients"]) == {"A", "B"}
+    assert chr21["patients"]["A"]["n_variants"] == 3
+    assert chr21["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(0.5)
+    assert set(chr22["patients"]) == {"A", "B", "C"}
+    assert chr22["patients"]["A"]["n_variants"] == 1
+    assert chr22["patients"]["A"]["max_effect"]["n_damaging"] == 0
+    assert chr22["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(0.0)
+    assert chr22["patients"]["C"]["max_effect"]["max_score"] == pytest.approx(0.9)
+
+    person_a = payload["patients"]["A"]
+    assert person_a["n_variants"] == 4
+    assert person_a["n_unscored"] == 1
+    effect = person_a["max_effect"]
+    assert effect["n_scored"] == 3
+    assert effect["n_damaging"] == 1
+    assert effect["fraction_damaging"] == pytest.approx(1 / 3)
+    assert effect["sum_effect"] == pytest.approx(1.4)
+    assert effect["sum_damaging"] == pytest.approx(0.8)
+    assert effect["max_score"] == pytest.approx(0.8)
+
+    person_b = payload["patients"]["B"]["max_effect"]
+    assert payload["patients"]["B"]["n_variants"] == 2
+    assert payload["patients"]["B"]["n_unscored"] == 1
+    assert person_b["n_scored"] == 1
+    assert person_b["n_damaging"] == 0
+    assert person_b["fraction_damaging"] == pytest.approx(0.0)
+    assert person_b["max_score"] == pytest.approx(0.2)
+    assert set(payload["patients"]) == {"A", "B", "C"}
+
+    on_disk = json.loads(output.read_text(encoding="utf-8"))
+    assert on_disk["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(1 / 3)

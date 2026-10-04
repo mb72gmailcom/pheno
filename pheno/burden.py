@@ -23,12 +23,18 @@ def compute_burden(
     threshold: float,
     use_abs: bool,
     transcripts: str,
+    output: Path | None = None,
 ) -> dict[str, object]:
     """Burden for people who appear in ``prefix`` TSVs and have a known status.
 
     ``people`` maps a person id to ``(status, family_id)``. ``status`` is
     ``asd`` or ``unaffected``. Transcript scores are made absolute when
     ``use_abs`` is set, then collapsed with ``max`` or ``mean``.
+
+    Each chromosome is scored on its own. When ``output`` is set, that
+    chromosome payload is written to ``{output.parent}/{chrom}/{output.name}``
+    before the next chromosome starts. The returned payload, also written to
+    ``output``, is the sum of those chromosome files.
     """
     if transcripts not in ("max", "mean"):
         raise ValueError("transcripts must be 'max' or 'mean'")
@@ -41,8 +47,9 @@ def compute_burden(
     if not columns:
         raise ValueError("at least one Otari column is required")
 
-    patients: dict[str, dict[str, object]] = {}
+    payloads: list[dict[str, object]] = []
     for chrom_dir in _chrom_dirs(input_dir):
+        patients: dict[str, dict[str, object]] = {}
         for path, start, end in _shard_files(chrom_dir, prefix):
             rows = list(_iter_variant_rows(path))
             needed = {_variant_id(chrom, pos, ref, alt) for chrom, pos, ref, alt, _patients in rows}
@@ -61,15 +68,28 @@ def compute_burden(
                     use_abs=use_abs,
                     transcripts=transcripts,
                 )
+        payload = _payload(
+            patients,
+            threshold=threshold,
+            use_abs=use_abs,
+            transcripts=transcripts,
+            columns=columns,
+        )
+        if output is not None:
+            write_burden(output.parent / chrom_dir.name / output.name, payload)
+        payloads.append(payload)
         print(f"finished processing {chrom_dir.name}", flush=True)
 
-    return {
-        "threshold": threshold,
-        "abs": use_abs,
-        "transcripts": transcripts,
-        "columns": list(columns),
-        "patients": {person: patients[person] for person in sorted(patients)},
-    }
+    total = _sum_burdens(
+        payloads,
+        columns,
+        threshold=threshold,
+        use_abs=use_abs,
+        transcripts=transcripts,
+    )
+    if output is not None:
+        write_burden(output, total)
+    return total
 
 
 def load_people(family_file: Path, column_map: ColumnMap) -> dict[str, tuple[str, str]]:
@@ -107,6 +127,81 @@ def write_burden(path: Path, payload: dict[str, object]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _payload(
+    patients: dict[str, dict[str, object]],
+    *,
+    threshold: float,
+    use_abs: bool,
+    transcripts: str,
+    columns: list[str],
+) -> dict[str, object]:
+    return {
+        "threshold": threshold,
+        "abs": use_abs,
+        "transcripts": transcripts,
+        "columns": list(columns),
+        "patients": {person: patients[person] for person in sorted(patients)},
+    }
+
+
+def _sum_burdens(
+    payloads: list[dict[str, object]],
+    columns: list[str],
+    *,
+    threshold: float,
+    use_abs: bool,
+    transcripts: str,
+) -> dict[str, object]:
+    """Add per-chromosome burdens. ``fraction_damaging`` is recomputed."""
+    patients: dict[str, dict[str, object]] = {}
+    for payload in payloads:
+        chrom_patients = payload["patients"]
+        if not isinstance(chrom_patients, dict):
+            raise ValueError("burden payload is missing patients")
+        for person, record in chrom_patients.items():
+            if not isinstance(record, dict):
+                raise ValueError(f"burden record for {person} is not an object")
+            total = patients.get(person)
+            if total is None:
+                total = {
+                    "status": record["status"],
+                    "family_id": record["family_id"],
+                    "n_variants": 0,
+                    "n_unscored": 0,
+                }
+                for column in columns:
+                    total[column] = _empty_column()
+                patients[person] = total
+            total["n_variants"] = int(total["n_variants"]) + int(record["n_variants"])
+            total["n_unscored"] = int(total["n_unscored"]) + int(record["n_unscored"])
+            for column in columns:
+                column_record = record[column]
+                if not isinstance(column_record, dict):
+                    raise ValueError(f"burden column {column} for {person} is not an object")
+                _merge_column(total[column], column_record)
+    return _payload(
+        patients,
+        threshold=threshold,
+        use_abs=use_abs,
+        transcripts=transcripts,
+        columns=columns,
+    )
+
+
+def _merge_column(dest: dict[str, object], src: dict[str, object]) -> None:
+    dest["n_scored"] = int(dest["n_scored"]) + int(src["n_scored"])
+    dest["n_damaging"] = int(dest["n_damaging"]) + int(src["n_damaging"])
+    dest["sum_effect"] = float(dest["sum_effect"]) + float(src["sum_effect"])
+    dest["sum_damaging"] = float(dest["sum_damaging"]) + float(src["sum_damaging"])
+    src_max = src["max_score"]
+    if src_max is not None:
+        current = dest["max_score"]
+        if current is None or float(src_max) > float(current):
+            dest["max_score"] = float(src_max)
+    scored = int(dest["n_scored"])
+    dest["fraction_damaging"] = int(dest["n_damaging"]) / scored if scored else None
 
 
 def _add_variant(

@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from pheno.burden import compute_burden, load_people, write_burden
+from pheno.burden import compute_burden, load_people
 from pheno.mapping import load_column_map
 
 
@@ -28,7 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Parent of {prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
     )
-    parser.add_argument("--output", required=True, type=Path, help="Output JSON file")
+    parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Genome-wide JSON file. Each chromosome is also written to {parent}/chrN/{name}",
+    )
     parser.add_argument("--file-pattern", required=True, help="Filename prefix, e.g. inherited or denovo")
     parser.add_argument(
         "--column-map",
@@ -61,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         column_map = load_column_map(args.column_map)
         people = load_people(args.family_file, column_map)
-        payload = compute_burden(
+        compute_burden(
             args.input_dir,
             args.otari_dir,
             args.file_pattern,
@@ -70,8 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             threshold=args.threshold,
             use_abs=args.abs,
             transcripts=transcripts,
+            output=args.output,
         )
-        write_burden(args.output, payload)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
