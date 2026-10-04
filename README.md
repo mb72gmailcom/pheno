@@ -82,10 +82,10 @@ pheno-asd-burden \
   --column-map examples/column_map.json \
   --otari-columns max_effect,Brain \
   --threshold 0.5 \
-  --output burden.json
+  --output-dir /path/to/burden
 ```
 
-Variant TSVs must be named `{prefix}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/{prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. Each chromosome is written to `{output-parent}/chrN/{output-name}` as it finishes. `--output` is the sum of those files. Counts and sums are added, `max_score` is the maximum across chromosomes, and `fraction_damaging` is recomputed from the summed `n_damaging` and `n_scored`. A person is left out of a chromosome file when they carry no variant on that chromosome. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
+Variant TSVs must be named `{prefix}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/{prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. Each chromosome is written to `{output-dir}/chrN/burden.json` as it finishes. `{output-dir}/burden.json` is the sum of those files. Counts and sums are added, `max_score` is the maximum across chromosomes, and `fraction_damaging` is recomputed from the summed `n_damaging` and `n_scored`. A person is left out of a chromosome file when they carry no variant on that chromosome. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
 
 ## Family file
 

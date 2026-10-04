@@ -11,6 +11,7 @@ from pheno.mapping import ColumnMap
 
 _CHROM_DIR = re.compile(r"^chr(\d+|X|Y)$")
 _OTARI_NAME = "variant_effects_comprehensive.tsv"
+_BURDEN_NAME = "burden.json"
 
 
 def compute_burden(
@@ -23,7 +24,7 @@ def compute_burden(
     threshold: float,
     use_abs: bool,
     transcripts: str,
-    output: Path | None = None,
+    output_dir: Path | None = None,
 ) -> dict[str, object]:
     """Burden for people who appear in ``prefix`` TSVs and have a known status.
 
@@ -31,10 +32,10 @@ def compute_burden(
     ``asd`` or ``unaffected``. Transcript scores are made absolute when
     ``use_abs`` is set, then collapsed with ``max`` or ``mean``.
 
-    Each chromosome is scored on its own. When ``output`` is set, that
-    chromosome payload is written to ``{output.parent}/{chrom}/{output.name}``
+    Each chromosome is scored on its own. When ``output_dir`` is set, that
+    chromosome payload is written to ``{output_dir}/{chrom}/burden.json``
     before the next chromosome starts. The returned payload, also written to
-    ``output``, is the sum of those chromosome files.
+    ``{output_dir}/burden.json``, is the sum of those chromosome files.
     """
     if transcripts not in ("max", "mean"):
         raise ValueError("transcripts must be 'max' or 'mean'")
@@ -75,8 +76,8 @@ def compute_burden(
             transcripts=transcripts,
             columns=columns,
         )
-        if output is not None:
-            write_burden(output.parent / chrom_dir.name / output.name, payload)
+        if output_dir is not None:
+            write_burden(output_dir / chrom_dir.name / _BURDEN_NAME, payload)
         payloads.append(payload)
         print(f"finished processing {chrom_dir.name}", flush=True)
 
@@ -87,8 +88,8 @@ def compute_burden(
         use_abs=use_abs,
         transcripts=transcripts,
     )
-    if output is not None:
-        write_burden(output, total)
+    if output_dir is not None:
+        write_burden(output_dir / _BURDEN_NAME, total)
     return total
 
 

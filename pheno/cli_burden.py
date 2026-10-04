@@ -29,10 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parent of {prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
     )
     parser.add_argument(
-        "--output",
+        "--output-dir",
         required=True,
         type=Path,
-        help="Genome-wide JSON file. Each chromosome is also written to {parent}/chrN/{name}",
+        help="Directory for burden.json and chrN/burden.json",
     )
     parser.add_argument("--file-pattern", required=True, help="Filename prefix, e.g. inherited or denovo")
     parser.add_argument(
@@ -75,12 +75,12 @@ def main(argv: list[str] | None = None) -> int:
             threshold=args.threshold,
             use_abs=args.abs,
             transcripts=transcripts,
-            output=args.output,
+            output_dir=args.output_dir,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Wrote burden to {args.output}")
+    print(f"Wrote burden to {args.output_dir}")
     return 0
 
 

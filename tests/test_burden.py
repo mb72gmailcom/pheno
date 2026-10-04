@@ -113,7 +113,7 @@ def test_burden_mean_transcripts(tmp_path: Path):
 
 def test_burden_cli_no_abs(tmp_path: Path):
     source, otari, family = _cohort(tmp_path)
-    output = tmp_path / "burden.json"
+    output_dir = tmp_path / "burden"
     rc = main(
         [
             "--family-file",
@@ -122,8 +122,8 @@ def test_burden_cli_no_abs(tmp_path: Path):
             str(source),
             "--otari-dir",
             str(otari),
-            "--output",
-            str(output),
+            "--output-dir",
+            str(output_dir),
             "--file-pattern",
             "inherited",
             "--otari-columns",
@@ -135,13 +135,13 @@ def test_burden_cli_no_abs(tmp_path: Path):
         ]
     )
     assert rc == 0
-    payload = json.loads(output.read_text(encoding="utf-8"))
+    payload = json.loads((output_dir / "burden.json").read_text(encoding="utf-8"))
     assert payload["abs"] is False
     brain = payload["patients"]["A"]["Brain"]
     assert brain["max_score"] == pytest.approx(0.1)
     assert brain["sum_effect"] == pytest.approx(-0.1)
     assert brain["n_damaging"] == 0
-    chromosome = json.loads((output.parent / "chr21" / "burden.json").read_text(encoding="utf-8"))
+    chromosome = json.loads((output_dir / "chr21" / "burden.json").read_text(encoding="utf-8"))
     assert chromosome["patients"]["A"]["Brain"]["max_score"] == pytest.approx(0.1)
 
 
@@ -157,7 +157,7 @@ def test_burden_sums_chromosomes(tmp_path: Path):
         + "22_10_A_G_hg38\tENST00000441009\t0.2\t0.2\t0.2\n"
         + "22_11_T_C_hg38\tENST00000441009\t0.9\t0.9\t0.9\n",
     )
-    output = tmp_path / "out" / "burden.json"
+    output_dir = tmp_path / "out"
     people = load_people(family, load_column_map(None))
     payload = compute_burden(
         source,
@@ -168,11 +168,11 @@ def test_burden_sums_chromosomes(tmp_path: Path):
         threshold=0.5,
         use_abs=True,
         transcripts="max",
-        output=output,
+        output_dir=output_dir,
     )
 
-    chr21 = json.loads((output.parent / "chr21" / "burden.json").read_text(encoding="utf-8"))
-    chr22 = json.loads((output.parent / "chr22" / "burden.json").read_text(encoding="utf-8"))
+    chr21 = json.loads((output_dir / "chr21" / "burden.json").read_text(encoding="utf-8"))
+    chr22 = json.loads((output_dir / "chr22" / "burden.json").read_text(encoding="utf-8"))
     assert set(chr21["patients"]) == {"A", "B"}
     assert chr21["patients"]["A"]["n_variants"] == 3
     assert chr21["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(0.5)
@@ -202,5 +202,5 @@ def test_burden_sums_chromosomes(tmp_path: Path):
     assert person_b["max_score"] == pytest.approx(0.2)
     assert set(payload["patients"]) == {"A", "B", "C"}
 
-    on_disk = json.loads(output.read_text(encoding="utf-8"))
+    on_disk = json.loads((output_dir / "burden.json").read_text(encoding="utf-8"))
     assert on_disk["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(1 / 3)
