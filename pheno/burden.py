@@ -61,6 +61,7 @@ def compute_burden(
                     use_abs=use_abs,
                     transcripts=transcripts,
                 )
+        print(f"finished processing {chrom_dir.name}", flush=True)
 
     return {
         "threshold": threshold,
