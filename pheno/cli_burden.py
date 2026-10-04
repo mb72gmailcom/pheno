@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--otari-dir",
         required=True,
         type=Path,
-        help="Parent of {prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
+        help="Parent of {otari-prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
     )
     parser.add_argument(
         "--output-dir",
@@ -34,7 +34,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Directory for burden.json and chrN/burden.json",
     )
-    parser.add_argument("--file-pattern", required=True, help="Filename prefix, e.g. inherited or denovo")
+    parser.add_argument(
+        "--file-pattern",
+        required=True,
+        help="Input TSV prefix, e.g. inherited or inherited_asd",
+    )
+    parser.add_argument(
+        "--otari-prefix",
+        default=None,
+        help="Otari directory name under --otari-dir. Default: --file-pattern",
+    )
     parser.add_argument(
         "--column-map",
         default=None,
@@ -76,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             use_abs=args.abs,
             transcripts=transcripts,
             output_dir=args.output_dir,
+            otari_prefix=args.otari_prefix,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

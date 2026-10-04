@@ -204,3 +204,24 @@ def test_burden_sums_chromosomes(tmp_path: Path):
 
     on_disk = json.loads((output_dir / "burden.json").read_text(encoding="utf-8"))
     assert on_disk["patients"]["A"]["max_effect"]["fraction_damaging"] == pytest.approx(1 / 3)
+
+
+def test_burden_otari_prefix_can_differ(tmp_path: Path):
+    source, otari, family = _cohort(tmp_path)
+    inherited = (source / "chr21" / "inherited_25000001_27500000.tsv").read_text(encoding="utf-8")
+    _write(source / "chr21" / "inherited_asd_25000001_27500000.tsv", inherited)
+    people = load_people(family, load_column_map(None))
+    payload = compute_burden(
+        source,
+        otari,
+        "inherited_asd",
+        people,
+        ["max_effect"],
+        threshold=0.5,
+        use_abs=True,
+        transcripts="max",
+        otari_prefix="inherited",
+    )
+    effect = payload["patients"]["A"]["max_effect"]
+    assert effect["n_scored"] == 2
+    assert effect["max_score"] == pytest.approx(0.8)

@@ -25,12 +25,17 @@ def compute_burden(
     use_abs: bool,
     transcripts: str,
     output_dir: Path | None = None,
+    otari_prefix: str | None = None,
 ) -> dict[str, object]:
     """Burden for people who appear in ``prefix`` TSVs and have a known status.
 
     ``people`` maps a person id to ``(status, family_id)``. ``status`` is
     ``asd`` or ``unaffected``. Transcript scores are made absolute when
     ``use_abs`` is set, then collapsed with ``max`` or ``mean``.
+
+    ``prefix`` selects ``{prefix}_{start}_{end}.tsv``. ``otari_prefix`` selects
+    ``{otari-dir}/{otari_prefix}/chrN/{start}_{end}/``. When ``otari_prefix``
+    is omitted, it is the same as ``prefix``.
 
     Each chromosome is scored on its own. When ``output_dir`` is set, that
     chromosome payload is written to ``{output_dir}/{chrom}/burden.json``
@@ -45,6 +50,10 @@ def compute_burden(
         raise ValueError(f"Otari directory not found: {otari_dir}")
     if not prefix:
         raise ValueError("file pattern must not be empty")
+    if otari_prefix is None:
+        otari_prefix = prefix
+    if not otari_prefix:
+        raise ValueError("Otari prefix must not be empty")
     if not columns:
         raise ValueError("at least one Otari column is required")
 
@@ -55,7 +64,7 @@ def compute_burden(
             rows = list(_iter_variant_rows(path))
             needed = {_variant_id(chrom, pos, ref, alt) for chrom, pos, ref, alt, _patients in rows}
             otari_path = (
-                otari_dir / prefix / chrom_dir.name / f"{start}_{end}" / _OTARI_NAME
+                otari_dir / otari_prefix / chrom_dir.name / f"{start}_{end}" / _OTARI_NAME
             )
             scores = _load_otari(otari_path, needed, columns)
             for chrom, pos, ref, alt, carriers in rows:
