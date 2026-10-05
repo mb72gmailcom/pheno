@@ -88,6 +88,24 @@ pheno-asd-burden \
 
 Variant TSVs must be named `{file-pattern}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/{otari-prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. When `--otari-prefix` is omitted, it is the same as `--file-pattern`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. Each chromosome is written to `{output-dir}/chrN/burden.json` as it finishes. `{output-dir}/burden.json` is the sum of those files. Counts and sums are added, `max_score` is the maximum across chromosomes, and `fraction_damaging` is recomputed from the summed `n_damaging` and `n_scored`. A person is left out of a chromosome file when they carry no variant on that chromosome. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
 
+Per-gene Otari burden for ASD children and their unaffected siblings. A variant is assigned to a gene when it falls in the gene body or within 2000 bp of either end. Transcripts are collapsed within that gene.
+
+```bash
+pheno-asd-burden-gene \
+  --family-file family.tsv \
+  --input-dir /path/to/results \
+  --otari-dir /path/to/otari \
+  --annotation resources/gencode.v47.basic.annotation.clean.gtf.gz \
+  --file-pattern inherited \
+  --otari-prefix inherited \
+  --column-map examples/column_map.json \
+  --otari-columns max_effect \
+  --threshold 0.5 \
+  --output-dir /path/to/gene-burden
+```
+
+An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. `{output-dir}/genes.json` has one record per person and gene they carry. `{output-dir}/gene_summary.json` averages each gene over every ASD child and every unaffected sibling, including people who carry nothing in that gene. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` divides the sum of those person-level scores by the full group size. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
+
 ## Family file
 
 TSV with one row per person. A **child** is anyone with both parents defined (IDs not `0`, `false`, `-`, or empty) and a known ASD status. Missing ASD excludes the person. Missing sex keeps them in the `*_all` columns only.
