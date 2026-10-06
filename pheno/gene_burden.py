@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import gzip
 import heapq
-import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -25,7 +24,7 @@ from pheno.mapping import ColumnMap
 
 _OTARI_NAME = "variant_effects_comprehensive.tsv"
 _GENE_MAP_NAME = "interpretability_analysis.tsv"
-_GENES_NAME = "genes.json"
+_GENES_NAME = "genes.tsv.gz"
 _SUMMARY_NAME = "gene_summary.json"
 _WINDOW = 2000
 
@@ -100,8 +99,8 @@ def compute_gene_burden(
     A variant is assigned to every gene whose body, or the 2000 bp around
     either end, contains it. Transcript scores from the Otari shard are
     collapsed within each of those genes. Each shard is written to a temporary
-    file and removed after the chromosome outputs are complete. ``genes.json``
-    keeps only people who carry a variant in that gene. Each chromosome
+    file and removed after the chromosome outputs are complete. ``genes.tsv.gz``
+    has one row per person and gene. Each chromosome
     summary divides by every ASD child and every unaffected sibling, counting
     non-carriers as zero.
     """
@@ -281,21 +280,26 @@ def _write_chromosome_from_spills(
     genes_handle = None
     if chrom_out is not None:
         chrom_out.mkdir(parents=True, exist_ok=True)
-        genes_handle = (chrom_out / _GENES_NAME).open("w", encoding="utf-8")
-        _write_genes_header(genes_handle, meta)
-    first_gene = True
+        genes_handle = gzip.open(chrom_out / _GENES_NAME, "wt", encoding="utf-8", newline="")
+        writer = csv.DictWriter(
+            genes_handle,
+            fieldnames=_genes_tsv_fields(columns),
+            delimiter="\t",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+    else:
+        writer = None
     try:
         for gene, people in _iter_genes(spill_paths, columns):
-            if genes_handle is not None:
-                _write_gene_entry(genes_handle, gene, people, first_gene)
-                first_gene = False
+            if writer is not None:
+                _write_gene_rows(writer, gene, people, columns)
             summary_genes[gene] = {
                 "asd": _group_summary(people, "asd", n_asd, columns),
                 "unaffected_sibling": _group_summary(people, "unaffected", n_unaffected_sibling, columns),
             }
     finally:
         if genes_handle is not None:
-            genes_handle.write("\n  }\n}\n")
             genes_handle.close()
     summary = {
         **meta,
@@ -308,19 +312,49 @@ def _write_chromosome_from_spills(
     return summary
 
 
-def _write_genes_header(handle, meta: dict[str, object]) -> None:
-    handle.write("{\n")
-    handle.write(f'  "abs": {json.dumps(meta["abs"])},\n')
-    handle.write(f'  "columns": {json.dumps(meta["columns"])},\n')
-    handle.write(f'  "threshold": {json.dumps(meta["threshold"])},\n')
-    handle.write(f'  "transcripts": {json.dumps(meta["transcripts"])},\n')
-    handle.write('  "genes": {\n')
+def _genes_tsv_fields(columns: list[str]) -> list[str]:
+    fields = ["gene", "person", "status", "family_id", "n_variants", "n_unscored"]
+    for column in columns:
+        fields.extend(
+            [
+                f"{column}_n_scored",
+                f"{column}_n_damaging",
+                f"{column}_fraction_damaging",
+                f"{column}_sum_effect",
+                f"{column}_var_mean_effect",
+                f"{column}_sum_damaging",
+                f"{column}_max_score",
+            ]
+        )
+    return fields
 
 
-def _write_gene_entry(handle, gene: str, people: dict[str, dict[str, object]], first: bool) -> None:
-    if not first:
-        handle.write(",\n")
-    handle.write(f"    {json.dumps(gene)}: {json.dumps(people, sort_keys=True)}")
+def _write_gene_rows(writer: csv.DictWriter, gene: str, people: dict[str, dict[str, object]], columns: list[str]) -> None:
+    for person in sorted(people):
+        record = people[person]
+        row: dict[str, object] = {
+            "gene": gene,
+            "person": person,
+            "status": record["status"],
+            "family_id": record["family_id"],
+            "n_variants": record["n_variants"],
+            "n_unscored": record["n_unscored"],
+        }
+        for column in columns:
+            stats = record[column]
+            if not isinstance(stats, dict):
+                raise ValueError(f"burden column {column} for {person} is not an object")
+            row[f"{column}_n_scored"] = stats["n_scored"]
+            row[f"{column}_n_damaging"] = stats["n_damaging"]
+            fraction = stats["fraction_damaging"]
+            row[f"{column}_fraction_damaging"] = "" if fraction is None else fraction
+            row[f"{column}_sum_effect"] = stats["sum_effect"]
+            var_mean = _var_mean_effect(stats)
+            row[f"{column}_var_mean_effect"] = "" if var_mean is None else var_mean
+            row[f"{column}_sum_damaging"] = stats["sum_damaging"]
+            max_score = stats["max_score"]
+            row[f"{column}_max_score"] = "" if max_score is None else max_score
+        writer.writerow(row)
 
 
 def _iter_genes(spill_paths: list[Path], columns: list[str]):
@@ -700,13 +734,29 @@ def _summarize(
     }
 
 
+def _var_mean_effect(stats: dict[str, object]) -> float | None:
+    n_scored = int(stats["n_scored"])
+    if not n_scored:
+        return None
+    return float(stats["sum_effect"]) / n_scored
+
+
 def _group_summary(
     carriers: dict[str, object],
     status: str,
     n_people: int,
     columns: list[str],
 ) -> dict[str, object]:
-    totals = {column: {"sum_effect": 0.0, "n_scored": 0, "n_damaging": 0} for column in columns}
+    totals = {
+        column: {
+            "sum_effect": 0.0,
+            "sum_var_mean": 0.0,
+            "n_scored": 0,
+            "n_damaging": 0,
+            "n_scored_carriers": 0,
+        }
+        for column in columns
+    }
     n_carriers = 0
     for record in carriers.values():
         if not isinstance(record, dict) or record.get("status") != status:
@@ -720,12 +770,19 @@ def _group_summary(
             bucket["sum_effect"] += float(stats["sum_effect"])
             bucket["n_scored"] += int(stats["n_scored"])
             bucket["n_damaging"] += int(stats["n_damaging"])
+            var_mean = _var_mean_effect(stats)
+            if var_mean is not None:
+                bucket["sum_var_mean"] += var_mean
+                bucket["n_scored_carriers"] += 1
     summary: dict[str, object] = {"n_people": n_people, "n_carriers": n_carriers}
     for column in columns:
         bucket = totals[column]
         scored = bucket["n_scored"]
+        n_scored_carriers = bucket["n_scored_carriers"]
         summary[column] = {
-            "mean_sum_effect": (bucket["sum_effect"] / n_people) if n_people else None,
+            "mean_sum_effect": (bucket["sum_effect"] / n_carriers) if n_carriers else None,
+            "mean_var_mean_effect": (bucket["sum_var_mean"] / n_scored_carriers) if n_scored_carriers else None,
+            "n_scored_carriers": n_scored_carriers,
             "n_scored": scored,
             "n_damaging": bucket["n_damaging"],
             "fraction_damaging": (bucket["n_damaging"] / scored) if scored else None,
@@ -801,14 +858,26 @@ def _merge_summary_group(
         right_stats = right[column]
         if not isinstance(left_stats, dict) or not isinstance(right_stats, dict):
             raise ValueError(f"gene summary column {column} is not an object")
+        left_carriers = int(left["n_carriers"])
+        right_carriers = int(right["n_carriers"])
         left_mean = left_stats["mean_sum_effect"]
         right_mean = right_stats["mean_sum_effect"]
-        left_sum = 0.0 if left_mean is None else float(left_mean) * n_people
-        right_sum = 0.0 if right_mean is None else float(right_mean) * n_people
+        left_sum = 0.0 if left_mean is None else float(left_mean) * left_carriers
+        right_sum = 0.0 if right_mean is None else float(right_mean) * right_carriers
+        left_scored_carriers = int(left_stats["n_scored_carriers"])
+        right_scored_carriers = int(right_stats["n_scored_carriers"])
+        left_var_mean = left_stats["mean_var_mean_effect"]
+        right_var_mean = right_stats["mean_var_mean_effect"]
+        left_var_sum = 0.0 if left_var_mean is None else float(left_var_mean) * left_scored_carriers
+        right_var_sum = 0.0 if right_var_mean is None else float(right_var_mean) * right_scored_carriers
         n_scored = int(left_stats["n_scored"]) + int(right_stats["n_scored"])
         n_damaging = int(left_stats["n_damaging"]) + int(right_stats["n_damaging"])
+        n_carriers = left_carriers + right_carriers
+        n_scored_carriers = left_scored_carriers + right_scored_carriers
         merged[column] = {
-            "mean_sum_effect": ((left_sum + right_sum) / n_people) if n_people else None,
+            "mean_sum_effect": ((left_sum + right_sum) / n_carriers) if n_carriers else None,
+            "mean_var_mean_effect": ((left_var_sum + right_var_sum) / n_scored_carriers) if n_scored_carriers else None,
+            "n_scored_carriers": n_scored_carriers,
             "n_scored": n_scored,
             "n_damaging": n_damaging,
             "fraction_damaging": (n_damaging / n_scored) if n_scored else None,

@@ -104,7 +104,7 @@ pheno-asd-burden-gene \
   --output-dir /path/to/gene-burden
 ```
 
-An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. While a chromosome is processed, each shard is written to a temporary file and removed after `{output-dir}/chrN/genes.json` and `{output-dir}/chrN/gene_summary.json` are complete. `{output-dir}/gene_summary.json` joins the chromosome summaries. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` divides the sum of those person-level scores by the full group size. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
+An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. While a chromosome is processed, each shard is written to a temporary file and removed after `{output-dir}/chrN/genes.tsv.gz` and `{output-dir}/chrN/gene_summary.json` are complete. `genes.tsv.gz` has one row per person and gene. `{output-dir}/gene_summary.json` joins the chromosome summaries. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` is the mean of their `sum_effect` values. `var_mean_effect` is `sum_effect / n_scored` for that person, and it is empty when `n_scored` is 0. `mean_var_mean_effect` is the mean of those values among carriers who have a score. `n_scored_carriers` is that count. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
 
 ## Family file
 

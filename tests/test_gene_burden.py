@@ -1,3 +1,5 @@
+import csv
+import gzip
 import json
 from pathlib import Path
 
@@ -27,6 +29,36 @@ gene	chr21	1000	2000	+	GENE1
 gene	chr21	100000	101000	+	GENE2
 gene	chr21	3000	5000	+	GENE3
 """
+
+
+def _load_genes(path: Path) -> dict[str, dict[str, dict[str, object]]]:
+    genes: dict[str, dict[str, dict[str, object]]] = {}
+    with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        score_columns = [name[: -len("_n_scored")] for name in fieldnames if name.endswith("_n_scored")]
+        for row in reader:
+            record: dict[str, object] = {
+                "status": row["status"],
+                "family_id": row["family_id"],
+                "n_variants": int(row["n_variants"]),
+                "n_unscored": int(row["n_unscored"]),
+            }
+            for column in score_columns:
+                fraction = row[f"{column}_fraction_damaging"]
+                var_mean = row[f"{column}_var_mean_effect"]
+                max_score = row[f"{column}_max_score"]
+                record[column] = {
+                    "n_scored": int(row[f"{column}_n_scored"]),
+                    "n_damaging": int(row[f"{column}_n_damaging"]),
+                    "fraction_damaging": None if fraction == "" else float(fraction),
+                    "sum_effect": float(row[f"{column}_sum_effect"]),
+                    "var_mean_effect": None if var_mean == "" else float(var_mean),
+                    "sum_damaging": float(row[f"{column}_sum_damaging"]),
+                    "max_score": None if max_score == "" else float(max_score),
+                }
+            genes.setdefault(row["gene"], {})[row["person"]] = record
+    return {"genes": genes}
 
 
 def _write(path: Path, body: str) -> None:
@@ -101,7 +133,7 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
         n_unaffected_sibling=n_siblings,
         output_dir=output,
     )
-    genes = json.loads((output / "chr21" / "genes.json").read_text(encoding="utf-8"))
+    genes = _load_genes(output / "chr21" / "genes.tsv.gz")
     assert not (output / "chr21" / ".partial").exists()
 
     gene1 = genes["genes"]["GENE1"]
@@ -114,12 +146,15 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
     assert effect["n_damaging"] == 1
     assert effect["fraction_damaging"] == pytest.approx(1 / 3)
     assert effect["sum_effect"] == pytest.approx(1.4)
+    assert effect["var_mean_effect"] == pytest.approx(1.4 / 3)
     assert effect["sum_damaging"] == pytest.approx(0.8)
     assert effect["max_score"] == pytest.approx(0.8)
     assert gene1["B"]["max_effect"]["sum_effect"] == pytest.approx(0.1)
+    assert gene1["B"]["max_effect"]["var_mean_effect"] == pytest.approx(0.1)
     assert gene1["D"]["n_variants"] == 1
     assert gene1["D"]["n_unscored"] == 1
     assert gene1["D"]["max_effect"]["n_scored"] == 0
+    assert gene1["D"]["max_effect"]["var_mean_effect"] is None
     assert "P" not in genes["genes"]["GENE2"]
     assert genes["genes"]["GENE2"]["C"]["max_effect"]["sum_effect"] == pytest.approx(0.9)
     assert set(genes["genes"]["GENE3"]) == {"A", "B", "D"}
@@ -133,7 +168,9 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
     asd = summary["genes"]["GENE1"]["asd"]
     assert asd["n_people"] == 3
     assert asd["n_carriers"] == 1
-    assert asd["max_effect"]["mean_sum_effect"] == pytest.approx(1.4 / 3)
+    assert asd["max_effect"]["mean_sum_effect"] == pytest.approx(1.4)
+    assert asd["max_effect"]["mean_var_mean_effect"] == pytest.approx(1.4 / 3)
+    assert asd["max_effect"]["n_scored_carriers"] == 1
     assert asd["max_effect"]["n_scored"] == 3
     assert asd["max_effect"]["n_damaging"] == 1
     assert asd["max_effect"]["fraction_damaging"] == pytest.approx(1 / 3)
@@ -141,14 +178,18 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
     assert siblings["n_people"] == 2
     assert siblings["n_carriers"] == 2
     assert siblings["max_effect"]["mean_sum_effect"] == pytest.approx(0.05)
+    assert siblings["max_effect"]["mean_var_mean_effect"] == pytest.approx(0.1)
+    assert siblings["max_effect"]["n_scored_carriers"] == 1
     assert siblings["max_effect"]["fraction_damaging"] == pytest.approx(0.0)
     gene2_asd = summary["genes"]["GENE2"]["asd"]
     assert gene2_asd["n_carriers"] == 1
-    assert gene2_asd["max_effect"]["mean_sum_effect"] == pytest.approx(0.3)
+    assert gene2_asd["max_effect"]["mean_sum_effect"] == pytest.approx(0.9)
     gene2_siblings = summary["genes"]["GENE2"]["unaffected_sibling"]
     assert gene2_siblings["n_carriers"] == 0
     assert gene2_siblings["n_people"] == 2
-    assert gene2_siblings["max_effect"]["mean_sum_effect"] == pytest.approx(0.0)
+    assert gene2_siblings["max_effect"]["mean_sum_effect"] is None
+    assert gene2_siblings["max_effect"]["mean_var_mean_effect"] is None
+    assert gene2_siblings["max_effect"]["n_scored_carriers"] == 0
     assert gene2_siblings["max_effect"]["fraction_damaging"] is None
 
 
@@ -175,9 +216,9 @@ def test_gene_burden_cli_writes_summary(tmp_path: Path):
     )
     assert rc == 0
     summary = json.loads((output_dir / "gene_summary.json").read_text(encoding="utf-8"))
-    chromosome = json.loads((output_dir / "chr21" / "genes.json").read_text(encoding="utf-8"))
+    chromosome = _load_genes(output_dir / "chr21" / "genes.tsv.gz")
     chromosome_summary = json.loads((output_dir / "chr21" / "gene_summary.json").read_text(encoding="utf-8"))
-    assert not (output_dir / "genes.json").exists()
+    assert not (output_dir / "genes.tsv.gz").exists()
     assert chromosome["genes"]["GENE2"]["C"]["status"] == "asd"
     assert chromosome["genes"]["GENE1"]["A"]["n_variants"] == 3
     assert chromosome_summary["genes"]["GENE1"]["asd"]["n_people"] == 3
@@ -235,12 +276,14 @@ def test_gene_burden_merges_person_across_shards(tmp_path: Path):
         n_unaffected_sibling=n_siblings,
         output_dir=output,
     )
-    genes = json.loads((output / "chr21" / "genes.json").read_text(encoding="utf-8"))
+    genes = _load_genes(output / "chr21" / "genes.tsv.gz")
     person_a = genes["genes"]["GENE1"]["A"]
     assert person_a["n_variants"] == 3
     assert person_a["max_effect"]["n_scored"] == 3
     assert person_a["max_effect"]["sum_effect"] == pytest.approx(1.4)
+    assert person_a["max_effect"]["var_mean_effect"] == pytest.approx(1.4 / 3)
     assert person_a["max_effect"]["max_score"] == pytest.approx(0.8)
     summary = json.loads((output / "chr21" / "gene_summary.json").read_text(encoding="utf-8"))
     assert summary["genes"]["GENE1"]["asd"]["n_carriers"] == 1
+    assert summary["genes"]["GENE1"]["asd"]["max_effect"]["mean_var_mean_effect"] == pytest.approx(1.4 / 3)
     assert not (output / "chr21" / ".partial").exists()
