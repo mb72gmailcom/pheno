@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         required=True,
         type=Path,
-        help="Directory for genes.json, gene_summary.json, and chrN/genes.json",
+        help="Directory for chrN/genes.json, chrN/gene_summary.json, and gene_summary.json",
     )
     parser.add_argument(
         "--file-pattern",

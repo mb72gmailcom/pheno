@@ -104,7 +104,7 @@ pheno-asd-burden-gene \
   --output-dir /path/to/gene-burden
 ```
 
-An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. `{output-dir}/genes.json` has one record per person and gene they carry. `{output-dir}/gene_summary.json` averages each gene over every ASD child and every unaffected sibling, including people who carry nothing in that gene. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` divides the sum of those person-level scores by the full group size. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
+An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. While a chromosome is processed, each shard is written to a temporary file and removed after `{output-dir}/chrN/genes.json` and `{output-dir}/chrN/gene_summary.json` are complete. `{output-dir}/gene_summary.json` joins the chromosome summaries. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` divides the sum of those person-level scores by the full group size. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
 
 ## Family file
 

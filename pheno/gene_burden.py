@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import csv
 import gzip
+import heapq
+import json
+import shutil
+import tempfile
 from pathlib import Path
 
 from pheno.burden import (
@@ -90,14 +94,16 @@ def compute_gene_burden(
     n_unaffected_sibling: int,
     output_dir: Path | None = None,
     otari_prefix: str | None = None,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> dict[str, object]:
     """Per-gene burden for ``people``, then the cohort summary.
 
     A variant is assigned to every gene whose body, or the 2000 bp around
     either end, contains it. Transcript scores from the Otari shard are
-    collapsed within each of those genes. ``genes.json`` keeps only people
-    who carry a variant in that gene. ``gene_summary.json`` divides by every
-    ASD child and every unaffected sibling, counting non-carriers as zero.
+    collapsed within each of those genes. Each shard is written to a temporary
+    file and removed after the chromosome outputs are complete. ``genes.json``
+    keeps only people who carry a variant in that gene. Each chromosome
+    summary divides by every ASD child and every unaffected sibling, counting
+    non-carriers as zero.
     """
     if transcripts not in ("max", "mean"):
         raise ValueError("transcripts must be 'max' or 'mean'")
@@ -115,14 +121,62 @@ def compute_gene_burden(
         raise ValueError("at least one Otari column is required")
 
     gene_index = load_gene_index(annotation)
-    payloads: list[dict[str, object]] = []
+    summaries: list[dict[str, object]] = []
     for chrom_dir in _chrom_dirs(input_dir):
-        genes: dict[str, dict[str, dict[str, object]]] = {}
+        summary = _process_chromosome(
+            chrom_dir,
+            otari_dir / otari_prefix / chrom_dir.name,
+            prefix,
+            people,
+            columns,
+            gene_index,
+            threshold=threshold,
+            use_abs=use_abs,
+            transcripts=transcripts,
+            n_asd=n_asd,
+            n_unaffected_sibling=n_unaffected_sibling,
+            output_dir=output_dir,
+        )
+        summaries.append(summary)
+        print(f"finished processing {chrom_dir.name}", flush=True)
+
+    combined = _combine_summaries(
+        summaries,
+        columns,
+        n_asd=n_asd,
+        n_unaffected_sibling=n_unaffected_sibling,
+    )
+    if output_dir is not None:
+        write_burden(output_dir / _SUMMARY_NAME, combined)
+    return combined
+
+
+def _process_chromosome(
+    chrom_dir: Path,
+    otari_chrom: Path,
+    prefix: str,
+    people: dict[str, tuple[str, str]],
+    columns: list[str],
+    gene_index: dict[str, list[tuple[int, int, str]]],
+    *,
+    threshold: float,
+    use_abs: bool,
+    transcripts: str,
+    n_asd: int,
+    n_unaffected_sibling: int,
+    output_dir: Path | None,
+) -> dict[str, object]:
+    """Spill each shard, then total one gene at a time."""
+    spill_root = output_dir / chrom_dir.name if output_dir is not None else Path(tempfile.mkdtemp())
+    spill_dir = spill_root / ".partial"
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    spill_paths: list[Path] = []
+    try:
         for path, start, end in _shard_files(chrom_dir, prefix):
+            genes: dict[str, dict[str, dict[str, object]]] = {}
             rows = list(_iter_variant_rows(path))
             needed = {_variant_id(chrom, pos, ref, alt) for chrom, pos, ref, alt, _patients in rows}
-            otari_path = otari_dir / otari_prefix / chrom_dir.name / f"{start}_{end}"
-            scores = _load_gene_scores(otari_path, needed, columns)
+            scores = _load_gene_scores(otari_chrom / f"{start}_{end}", needed, columns)
             assigned = _assign_rows(rows, gene_index)
             for (chrom, pos, ref, alt, carriers), gene_names in zip(rows, assigned):
                 variant_id = _variant_id(chrom, pos, ref, alt)
@@ -138,35 +192,191 @@ def compute_gene_burden(
                         use_abs=use_abs,
                         transcripts=transcripts,
                     )
-        payload = _genes_payload(
-            genes,
+            spill_path = spill_dir / f"{start}_{end}.tsv"
+            _write_spill(spill_path, genes, columns)
+            spill_paths.append(spill_path)
+        summary = _write_chromosome_from_spills(
+            spill_paths,
+            columns,
             threshold=threshold,
             use_abs=use_abs,
             transcripts=transcripts,
-            columns=columns,
+            n_asd=n_asd,
+            n_unaffected_sibling=n_unaffected_sibling,
+            chrom_out=None if output_dir is None else output_dir / chrom_dir.name,
         )
-        if output_dir is not None:
-            write_burden(output_dir / chrom_dir.name / _GENES_NAME, payload)
-        payloads.append(payload)
-        print(f"finished processing {chrom_dir.name}", flush=True)
+    finally:
+        shutil.rmtree(spill_dir, ignore_errors=True)
+        if output_dir is None:
+            shutil.rmtree(spill_root, ignore_errors=True)
+    return summary
 
-    merged = _merge_gene_payloads(
-        payloads,
-        columns,
-        threshold=threshold,
-        use_abs=use_abs,
-        transcripts=transcripts,
-    )
-    summary = _summarize(
-        merged,
-        columns,
-        n_asd=n_asd,
-        n_unaffected_sibling=n_unaffected_sibling,
-    )
-    if output_dir is not None:
-        write_burden(output_dir / _GENES_NAME, merged)
-        write_burden(output_dir / _SUMMARY_NAME, summary)
-    return merged, summary
+
+def _spill_fields(columns: list[str]) -> list[str]:
+    fields = ["gene", "person", "status", "family_id", "n_variants", "n_unscored"]
+    for column in columns:
+        fields.extend(
+            [
+                f"{column}.n_scored",
+                f"{column}.n_damaging",
+                f"{column}.sum_effect",
+                f"{column}.sum_damaging",
+                f"{column}.max_score",
+            ]
+        )
+    return fields
+
+
+def _write_spill(
+    path: Path,
+    genes: dict[str, dict[str, dict[str, object]]],
+    columns: list[str],
+) -> None:
+    fields = _spill_fields(columns)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        for gene in sorted(genes):
+            for person in sorted(genes[gene]):
+                record = genes[gene][person]
+                row = {
+                    "gene": gene,
+                    "person": person,
+                    "status": record["status"],
+                    "family_id": record["family_id"],
+                    "n_variants": record["n_variants"],
+                    "n_unscored": record["n_unscored"],
+                }
+                for column in columns:
+                    stats = record[column]
+                    if not isinstance(stats, dict):
+                        raise ValueError(f"burden column {column} for {person} is not an object")
+                    row[f"{column}.n_scored"] = stats["n_scored"]
+                    row[f"{column}.n_damaging"] = stats["n_damaging"]
+                    row[f"{column}.sum_effect"] = stats["sum_effect"]
+                    row[f"{column}.sum_damaging"] = stats["sum_damaging"]
+                    max_score = stats["max_score"]
+                    row[f"{column}.max_score"] = "" if max_score is None else max_score
+                writer.writerow(row)
+
+
+def _write_chromosome_from_spills(
+    spill_paths: list[Path],
+    columns: list[str],
+    *,
+    threshold: float,
+    use_abs: bool,
+    transcripts: str,
+    n_asd: int,
+    n_unaffected_sibling: int,
+    chrom_out: Path | None,
+) -> dict[str, object]:
+    summary_genes: dict[str, object] = {}
+    meta = {
+        "threshold": threshold,
+        "abs": use_abs,
+        "transcripts": transcripts,
+        "columns": list(columns),
+    }
+    genes_handle = None
+    if chrom_out is not None:
+        chrom_out.mkdir(parents=True, exist_ok=True)
+        genes_handle = (chrom_out / _GENES_NAME).open("w", encoding="utf-8")
+        _write_genes_header(genes_handle, meta)
+    first_gene = True
+    try:
+        for gene, people in _iter_genes(spill_paths, columns):
+            if genes_handle is not None:
+                _write_gene_entry(genes_handle, gene, people, first_gene)
+                first_gene = False
+            summary_genes[gene] = {
+                "asd": _group_summary(people, "asd", n_asd, columns),
+                "unaffected_sibling": _group_summary(people, "unaffected", n_unaffected_sibling, columns),
+            }
+    finally:
+        if genes_handle is not None:
+            genes_handle.write("\n  }\n}\n")
+            genes_handle.close()
+    summary = {
+        **meta,
+        "n_asd": n_asd,
+        "n_unaffected_sibling": n_unaffected_sibling,
+        "genes": summary_genes,
+    }
+    if chrom_out is not None:
+        write_burden(chrom_out / _SUMMARY_NAME, summary)
+    return summary
+
+
+def _write_genes_header(handle, meta: dict[str, object]) -> None:
+    handle.write("{\n")
+    handle.write(f'  "abs": {json.dumps(meta["abs"])},\n')
+    handle.write(f'  "columns": {json.dumps(meta["columns"])},\n')
+    handle.write(f'  "threshold": {json.dumps(meta["threshold"])},\n')
+    handle.write(f'  "transcripts": {json.dumps(meta["transcripts"])},\n')
+    handle.write('  "genes": {\n')
+
+
+def _write_gene_entry(handle, gene: str, people: dict[str, dict[str, object]], first: bool) -> None:
+    if not first:
+        handle.write(",\n")
+    handle.write(f"    {json.dumps(gene)}: {json.dumps(people, sort_keys=True)}")
+
+
+def _iter_genes(spill_paths: list[Path], columns: list[str]):
+    if not spill_paths:
+        return
+    handles = [path.open(encoding="utf-8", newline="") for path in spill_paths]
+    try:
+        readers = [csv.DictReader(handle, delimiter="\t") for handle in handles]
+        merged = heapq.merge(*readers, key=lambda row: (row["gene"], row["person"]))
+        current_gene = None
+        people: dict[str, dict[str, object]] = {}
+        for row in merged:
+            gene = row["gene"]
+            if current_gene is None:
+                current_gene = gene
+            elif gene != current_gene:
+                yield current_gene, people
+                current_gene = gene
+                people = {}
+            record = _record_from_spill(row, columns)
+            person = row["person"]
+            existing = people.get(person)
+            if existing is None:
+                people[person] = record
+                continue
+            existing["n_variants"] = int(existing["n_variants"]) + int(record["n_variants"])
+            existing["n_unscored"] = int(existing["n_unscored"]) + int(record["n_unscored"])
+            for column in columns:
+                _merge_column(existing[column], record[column])
+        if current_gene is not None:
+            yield current_gene, people
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def _record_from_spill(row: dict[str, str], columns: list[str]) -> dict[str, object]:
+    record: dict[str, object] = {
+        "status": row["status"],
+        "family_id": row["family_id"],
+        "n_variants": int(row["n_variants"]),
+        "n_unscored": int(row["n_unscored"]),
+    }
+    for column in columns:
+        n_scored = int(row[f"{column}.n_scored"])
+        n_damaging = int(row[f"{column}.n_damaging"])
+        max_raw = row[f"{column}.max_score"]
+        record[column] = {
+            "n_scored": n_scored,
+            "n_damaging": n_damaging,
+            "fraction_damaging": (n_damaging / n_scored) if n_scored else None,
+            "sum_effect": float(row[f"{column}.sum_effect"]),
+            "sum_damaging": float(row[f"{column}.sum_damaging"]),
+            "max_score": None if max_raw == "" else float(max_raw),
+        }
+    return record
 
 
 def load_gene_index(path: Path) -> dict[str, list[tuple[int, int, str]]]:
@@ -521,3 +731,86 @@ def _group_summary(
             "fraction_damaging": (bucket["n_damaging"] / scored) if scored else None,
         }
     return summary
+
+
+def _combine_summaries(
+    summaries: list[dict[str, object]],
+    columns: list[str],
+    *,
+    n_asd: int,
+    n_unaffected_sibling: int,
+) -> dict[str, object]:
+    """Join per-chromosome summaries. A gene is expected on one chromosome."""
+    if not summaries:
+        return {
+            "threshold": None,
+            "abs": None,
+            "transcripts": None,
+            "columns": list(columns),
+            "n_asd": n_asd,
+            "n_unaffected_sibling": n_unaffected_sibling,
+            "genes": {},
+        }
+    first = summaries[0]
+    genes: dict[str, dict[str, object]] = {}
+    for summary in summaries:
+        chrom_genes = summary["genes"]
+        if not isinstance(chrom_genes, dict):
+            raise ValueError("gene summary is missing genes")
+        for gene, groups in chrom_genes.items():
+            if not isinstance(groups, dict):
+                raise ValueError(f"gene summary for {gene} is not an object")
+            current = genes.get(str(gene))
+            if current is None:
+                genes[str(gene)] = groups
+                continue
+            genes[str(gene)] = {
+                "asd": _merge_summary_group(current["asd"], groups["asd"], n_asd, columns),
+                "unaffected_sibling": _merge_summary_group(
+                    current["unaffected_sibling"],
+                    groups["unaffected_sibling"],
+                    n_unaffected_sibling,
+                    columns,
+                ),
+            }
+    return {
+        "threshold": first["threshold"],
+        "abs": first["abs"],
+        "transcripts": first["transcripts"],
+        "columns": list(columns),
+        "n_asd": n_asd,
+        "n_unaffected_sibling": n_unaffected_sibling,
+        "genes": genes,
+    }
+
+
+def _merge_summary_group(
+    left: object,
+    right: object,
+    n_people: int,
+    columns: list[str],
+) -> dict[str, object]:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        raise ValueError("gene summary group is not an object")
+    merged: dict[str, object] = {
+        "n_people": n_people,
+        "n_carriers": int(left["n_carriers"]) + int(right["n_carriers"]),
+    }
+    for column in columns:
+        left_stats = left[column]
+        right_stats = right[column]
+        if not isinstance(left_stats, dict) or not isinstance(right_stats, dict):
+            raise ValueError(f"gene summary column {column} is not an object")
+        left_mean = left_stats["mean_sum_effect"]
+        right_mean = right_stats["mean_sum_effect"]
+        left_sum = 0.0 if left_mean is None else float(left_mean) * n_people
+        right_sum = 0.0 if right_mean is None else float(right_mean) * n_people
+        n_scored = int(left_stats["n_scored"]) + int(right_stats["n_scored"])
+        n_damaging = int(left_stats["n_damaging"]) + int(right_stats["n_damaging"])
+        merged[column] = {
+            "mean_sum_effect": ((left_sum + right_sum) / n_people) if n_people else None,
+            "n_scored": n_scored,
+            "n_damaging": n_damaging,
+            "fraction_damaging": (n_damaging / n_scored) if n_scored else None,
+        }
+    return merged

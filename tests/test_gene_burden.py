@@ -86,7 +86,8 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
     assert n_asd == 3
     assert n_siblings == 2
     assert set(people) == {"A", "B", "C", "D", "F"}
-    genes, summary = compute_gene_burden(
+    output = tmp_path / "out"
+    summary = compute_gene_burden(
         source,
         otari,
         annotation,
@@ -98,7 +99,10 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
         transcripts="max",
         n_asd=n_asd,
         n_unaffected_sibling=n_siblings,
+        output_dir=output,
     )
+    genes = json.loads((output / "chr21" / "genes.json").read_text(encoding="utf-8"))
+    assert not (output / "chr21" / ".partial").exists()
 
     gene1 = genes["genes"]["GENE1"]
     assert set(gene1) == {"A", "B", "D"}
@@ -170,10 +174,73 @@ def test_gene_burden_cli_writes_summary(tmp_path: Path):
         ]
     )
     assert rc == 0
-    genes = json.loads((output_dir / "genes.json").read_text(encoding="utf-8"))
     summary = json.loads((output_dir / "gene_summary.json").read_text(encoding="utf-8"))
     chromosome = json.loads((output_dir / "chr21" / "genes.json").read_text(encoding="utf-8"))
-    assert genes["genes"]["GENE2"]["C"]["status"] == "asd"
+    chromosome_summary = json.loads((output_dir / "chr21" / "gene_summary.json").read_text(encoding="utf-8"))
+    assert not (output_dir / "genes.json").exists()
+    assert chromosome["genes"]["GENE2"]["C"]["status"] == "asd"
     assert chromosome["genes"]["GENE1"]["A"]["n_variants"] == 3
+    assert chromosome_summary["genes"]["GENE1"]["asd"]["n_people"] == 3
     assert summary["n_asd"] == 3
     assert summary["genes"]["GENE1"]["asd"]["n_people"] == 3
+    assert not (output_dir / "chr21" / ".partial").exists()
+
+
+def test_gene_burden_merges_person_across_shards(tmp_path: Path):
+    source, otari, annotation, family = _cohort(tmp_path)
+    single = source / "chr21" / "inherited_1000_5000.tsv"
+    body = single.read_text(encoding="utf-8")
+    lines = [line for line in body.splitlines() if line and not line.startswith("#")]
+    early = [line for line in lines if int(line.split("\t")[1]) <= 1800]
+    late = [line for line in lines if int(line.split("\t")[1]) > 1800]
+    single.unlink()
+    _write(source / "chr21" / "inherited_1000_1800.tsv", HEADER + "".join(f"{line}\n" for line in early))
+    _write(source / "chr21" / "inherited_1801_200000.tsv", HEADER + "".join(f"{line}\n" for line in late))
+    shard = otari / "inherited" / "chr21" / "1000_5000"
+    effects = (shard / "variant_effects_comprehensive.tsv").read_text(encoding="utf-8")
+    genes_map = (shard / "interpretability_analysis.tsv").read_text(encoding="utf-8")
+    early_ids = {"21_1500_A_T_hg38", "21_1800_A_T_hg38"}
+
+    def _split(text: str, keep_early: bool) -> str:
+        rows = text.splitlines()
+        kept = [rows[0]]
+        for row in rows[1:]:
+            variant_id = row.split("\t", 1)[0]
+            if (variant_id in early_ids) == keep_early:
+                kept.append(row)
+        return "\n".join(kept) + "\n"
+
+    _write(otari / "inherited" / "chr21" / "1000_1800" / "variant_effects_comprehensive.tsv", _split(effects, True))
+    _write(otari / "inherited" / "chr21" / "1000_1800" / "interpretability_analysis.tsv", _split(genes_map, True))
+    _write(otari / "inherited" / "chr21" / "1801_200000" / "variant_effects_comprehensive.tsv", _split(effects, False))
+    _write(otari / "inherited" / "chr21" / "1801_200000" / "interpretability_analysis.tsv", _split(genes_map, False))
+    shutil_shard = shard
+    for path in shutil_shard.iterdir():
+        path.unlink()
+    shutil_shard.rmdir()
+
+    people, n_asd, n_siblings = load_analysis_groups(family, load_column_map(None))
+    output = tmp_path / "out"
+    compute_gene_burden(
+        source,
+        otari,
+        annotation,
+        "inherited",
+        people,
+        ["max_effect"],
+        threshold=0.5,
+        use_abs=True,
+        transcripts="max",
+        n_asd=n_asd,
+        n_unaffected_sibling=n_siblings,
+        output_dir=output,
+    )
+    genes = json.loads((output / "chr21" / "genes.json").read_text(encoding="utf-8"))
+    person_a = genes["genes"]["GENE1"]["A"]
+    assert person_a["n_variants"] == 3
+    assert person_a["max_effect"]["n_scored"] == 3
+    assert person_a["max_effect"]["sum_effect"] == pytest.approx(1.4)
+    assert person_a["max_effect"]["max_score"] == pytest.approx(0.8)
+    summary = json.loads((output / "chr21" / "gene_summary.json").read_text(encoding="utf-8"))
+    assert summary["genes"]["GENE1"]["asd"]["n_carriers"] == 1
+    assert not (output / "chr21" / ".partial").exists()
