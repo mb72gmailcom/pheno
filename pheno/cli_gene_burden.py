@@ -13,7 +13,7 @@ from pheno.mapping import load_column_map
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pheno-asd-burden-gene",
-        description="Compute per-gene Otari burden for ASD children and unaffected siblings.",
+        description="Compute per-gene burden for ASD children and unaffected siblings.",
     )
     parser.add_argument("--family-file", required=True, type=Path, help="Family TSV with person, family, parents, and ASD columns")
     parser.add_argument(
@@ -24,9 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--otari-dir",
-        required=True,
         type=Path,
         help="Parent of {otari-prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
+    )
+    parser.add_argument(
+        "--score-dir",
+        type=Path,
+        help="Parent of chrN/{score-prefix}_{start}_{end}.tsv score files",
     )
     parser.add_argument(
         "--annotation",
@@ -51,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Otari directory name under --otari-dir. Default: --file-pattern",
     )
     parser.add_argument(
+        "--score-prefix",
+        default=None,
+        help="Filename prefix under --score-dir/chrN. Required with --score-dir",
+    )
+    parser.add_argument(
         "--column-map",
         default=None,
         type=Path,
@@ -60,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--otari-columns",
         default="max_effect",
         help="Comma-separated Otari score columns. Default: max_effect",
+    )
+    parser.add_argument(
+        "--score-columns",
+        default=None,
+        help="Comma-separated columns in the score TSV. Required with --score-dir",
     )
     parser.add_argument("--threshold", required=True, type=float, help="Damaging when the collapsed score is greater than this value")
     parser.add_argument(
@@ -76,9 +90,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    columns = _parse_columns(args.otari_columns)
     transcripts = "mean" if args.mean_transcripts else "max"
     try:
+        if (args.otari_dir is None) == (args.score_dir is None):
+            raise ValueError("set exactly one of --otari-dir and --score-dir")
+        if args.score_dir is not None:
+            if not args.score_prefix:
+                raise ValueError("--score-prefix is required with --score-dir")
+            if not args.score_columns:
+                raise ValueError("--score-columns is required with --score-dir")
+            columns = _parse_columns(args.score_columns, "score")
+        else:
+            columns = _parse_columns(args.otari_columns, "Otari")
         column_map = load_column_map(args.column_map)
         people, n_asd, n_siblings = load_analysis_groups(args.family_file, column_map)
         compute_gene_burden(
@@ -95,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
             n_unaffected_sibling=n_siblings,
             output_dir=args.output_dir,
             otari_prefix=args.otari_prefix,
+            score_dir=args.score_dir,
+            score_prefix=args.score_prefix,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -103,14 +128,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _parse_columns(text: str) -> list[str]:
+def _parse_columns(text: str, kind: str) -> list[str]:
     columns: list[str] = []
     for part in text.split(","):
         name = part.strip()
         if name and name not in columns:
             columns.append(name)
     if not columns:
-        raise ValueError("at least one Otari column is required")
+        raise ValueError(f"at least one {kind} column is required")
     return columns
 
 

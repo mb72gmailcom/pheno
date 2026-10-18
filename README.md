@@ -104,7 +104,22 @@ pheno-asd-burden-gene \
   --output-dir /path/to/gene-burden
 ```
 
-An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. While a chromosome is processed, each shard is written to a temporary file and removed after `{output-dir}/chrN/genes.tsv.gz` and `{output-dir}/chrN/gene_summary.json` are complete. `genes.tsv.gz` has one row per person and gene. `{output-dir}/gene_summary.json` joins the chromosome summaries. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` is the mean of their `sum_effect` values. `var_mean_effect` is `sum_effect / n_scored` for that person, and it is empty when `n_scored` is 0. `mean_var_mean_effect` is the mean of those values among carriers who have a score. `n_scored_carriers` is that count. The gene for each transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
+An unaffected sibling is an unaffected child who shares a family id with an ASD child. Parents are left out. While a chromosome is processed, each shard is written to a temporary file and removed after `{output-dir}/chrN/genes.tsv.gz` and `{output-dir}/chrN/gene_summary.json` are complete. `genes.tsv.gz` has one row per person and gene. `{output-dir}/gene_summary.json` joins the chromosome summaries. `n_carriers` counts people with at least one variant in the gene. `mean_sum_effect` is the mean of their `sum_effect` values. `var_mean_effect` is `sum_effect / n_scored` for that person, and it is empty when `n_scored` is 0. `mean_var_mean_effect` is the mean of those values among carriers who have a score. `n_scored_carriers` is that count. The gene for each Otari transcript is read from `interpretability_analysis.tsv` in the same Otari shard.
+
+The same command reads a variant score table when `--score-dir` is set instead of `--otari-dir`. `--score-prefix` is the filename prefix, and `--score-columns` names the numeric columns. A carrier row matches a score row on chromosome, position, ref, and alt. A blank cell is unscored. The stored number is used as it is: there is no absolute value and no transcript collapse. For `ag_PHRED`, pass that column alone.
+
+```bash
+pheno-asd-burden-gene \
+  --family-file family.tsv \
+  --input-dir /path/to/results \
+  --score-dir /path/to/scores \
+  --annotation resources/gencode.v47.basic.annotation.clean.gtf.gz \
+  --file-pattern inherited \
+  --score-prefix variants_enrich \
+  --score-columns ag_PHRED \
+  --threshold 1 \
+  --output-dir /path/to/gene-burden
+```
 
 ## Family file
 

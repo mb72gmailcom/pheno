@@ -287,3 +287,118 @@ def test_gene_burden_merges_person_across_shards(tmp_path: Path):
     assert summary["genes"]["GENE1"]["asd"]["n_carriers"] == 1
     assert summary["genes"]["GENE1"]["asd"]["max_effect"]["mean_var_mean_effect"] == pytest.approx(1.4 / 3)
     assert not (output / "chr21" / ".partial").exists()
+
+
+def test_gene_burden_score_column(tmp_path: Path):
+    source = tmp_path / "sites"
+    scores = tmp_path / "scores"
+    _write(
+        source / "chr21" / "inherited_1000_2000.tsv",
+        HEADER + "chr21\t1500\t.\tA\tT\tA\n" + "chr21\t1800\t.\tC\tG\tB\n",
+    )
+    _write(source / "chr21" / "inherited_2001_3000.tsv", HEADER + "chr21\t1100\t.\tG\tT\tA\n")
+    _write(
+        scores / "chr21" / "variants_enrich_1000_2000.tsv",
+        "chrom\tpos\tref\talt\tam_pathogenicity\tam_class\tag_raw_score\tag_PHRED\n"
+        "chr21\t1500\tA\tT\t\t\t-0.02\t2.5\n"
+        "21\t1800\tC\tG\t\t\t-0.01\t\n"
+        "chr21\t9999\tA\tC\t\t\t0\t9\n",
+    )
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(ANNOTATION, encoding="utf-8")
+    family = tmp_path / "family.tsv"
+    family.write_text(FAMILY, encoding="utf-8")
+    people, n_asd, n_siblings = load_analysis_groups(family, load_column_map(None))
+    output = tmp_path / "out"
+    summary = compute_gene_burden(
+        source,
+        None,
+        annotation,
+        "inherited",
+        people,
+        ["ag_PHRED"],
+        threshold=1,
+        use_abs=True,
+        transcripts="max",
+        n_asd=n_asd,
+        n_unaffected_sibling=n_siblings,
+        output_dir=output,
+        score_dir=scores,
+        score_prefix="variants_enrich",
+    )
+    genes = _load_genes(output / "chr21" / "genes.tsv.gz")
+    person_a = genes["genes"]["GENE1"]["A"]
+    assert person_a["n_variants"] == 2
+    assert person_a["n_unscored"] == 1
+    effect = person_a["ag_PHRED"]
+    assert effect["n_scored"] == 1
+    assert effect["n_damaging"] == 1
+    assert effect["sum_effect"] == pytest.approx(2.5)
+    assert effect["sum_damaging"] == pytest.approx(2.5)
+    assert effect["var_mean_effect"] == pytest.approx(2.5)
+    person_b = genes["genes"]["GENE1"]["B"]
+    assert person_b["n_unscored"] == 1
+    assert person_b["ag_PHRED"]["n_scored"] == 0
+    assert person_b["ag_PHRED"]["var_mean_effect"] is None
+    assert summary["abs"] is False
+    assert summary["transcripts"] == "variant"
+    assert summary["genes"]["GENE1"]["asd"]["ag_PHRED"]["mean_sum_effect"] == pytest.approx(2.5)
+    assert summary["genes"]["GENE1"]["asd"]["ag_PHRED"]["mean_var_mean_effect"] == pytest.approx(2.5)
+    siblings = summary["genes"]["GENE1"]["unaffected_sibling"]
+    assert siblings["ag_PHRED"]["mean_sum_effect"] == pytest.approx(0.0)
+    assert siblings["ag_PHRED"]["mean_var_mean_effect"] is None
+    assert siblings["ag_PHRED"]["n_scored_carriers"] == 0
+
+    output_dir = tmp_path / "cli"
+    rc = main(
+        [
+            "--family-file",
+            str(family),
+            "--input-dir",
+            str(source),
+            "--score-dir",
+            str(scores),
+            "--annotation",
+            str(annotation),
+            "--output-dir",
+            str(output_dir),
+            "--file-pattern",
+            "inherited",
+            "--score-prefix",
+            "variants_enrich",
+            "--score-columns",
+            "ag_PHRED",
+            "--threshold",
+            "1",
+            "--abs",
+        ]
+    )
+    assert rc == 0
+    written = json.loads((output_dir / "gene_summary.json").read_text(encoding="utf-8"))
+    assert written["abs"] is False
+    assert written["genes"]["GENE1"]["asd"]["ag_PHRED"]["mean_var_mean_effect"] == pytest.approx(2.5)
+    both = main(
+        [
+            "--family-file",
+            str(family),
+            "--input-dir",
+            str(source),
+            "--otari-dir",
+            str(scores),
+            "--score-dir",
+            str(scores),
+            "--annotation",
+            str(annotation),
+            "--output-dir",
+            str(tmp_path / "both"),
+            "--file-pattern",
+            "inherited",
+            "--score-prefix",
+            "variants_enrich",
+            "--score-columns",
+            "ag_PHRED",
+            "--threshold",
+            "1",
+        ]
+    )
+    assert both == 1

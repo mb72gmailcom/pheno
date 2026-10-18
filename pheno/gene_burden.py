@@ -80,7 +80,7 @@ def load_analysis_groups(
 
 def compute_gene_burden(
     input_dir: Path,
-    otari_dir: Path,
+    otari_dir: Path | None,
     annotation: Path,
     prefix: str,
     people: dict[str, tuple[str, str]],
@@ -93,38 +93,53 @@ def compute_gene_burden(
     n_unaffected_sibling: int,
     output_dir: Path | None = None,
     otari_prefix: str | None = None,
+    score_dir: Path | None = None,
+    score_prefix: str | None = None,
 ) -> dict[str, object]:
     """Per-gene burden for ``people``, then the cohort summary.
 
     A variant is assigned to every gene whose body, or the 2000 bp around
-    either end, contains it. Transcript scores from the Otari shard are
-    collapsed within each of those genes. Each shard is written to a temporary
-    file and removed after the chromosome outputs are complete. ``genes.tsv.gz``
-    has one row per person and gene. Each chromosome
+    either end, contains it. With ``score_dir``, each selected column contributes
+    the number stored for that variant. Otherwise transcript scores from the
+    Otari shard are collapsed within each gene. Each shard is written to a
+    temporary file and removed after the chromosome outputs are complete.
+    ``genes.tsv.gz`` has one row per person and gene. Each chromosome
     summary divides by every ASD child and every unaffected sibling, counting
     non-carriers as zero.
     """
-    if transcripts not in ("max", "mean"):
+    if (otari_dir is None) == (score_dir is None):
+        raise ValueError("set exactly one of the Otari directory and the score directory")
+    if score_dir is not None:
+        use_abs = False
+        transcripts = "variant"
+    elif transcripts not in ("max", "mean"):
         raise ValueError("transcripts must be 'max' or 'mean'")
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
-    if not otari_dir.is_dir():
-        raise ValueError(f"Otari directory not found: {otari_dir}")
     if not prefix:
         raise ValueError("file pattern must not be empty")
-    if otari_prefix is None:
-        otari_prefix = prefix
-    if not otari_prefix:
-        raise ValueError("Otari prefix must not be empty")
     if not columns:
-        raise ValueError("at least one Otari column is required")
+        raise ValueError("at least one score column is required")
+    if score_dir is not None:
+        if not score_dir.is_dir():
+            raise ValueError(f"score directory not found: {score_dir}")
+        if not score_prefix:
+            raise ValueError("score prefix must not be empty")
+    else:
+        if not otari_dir.is_dir():
+            raise ValueError(f"Otari directory not found: {otari_dir}")
+        if otari_prefix is None:
+            otari_prefix = prefix
+        if not otari_prefix:
+            raise ValueError("Otari prefix must not be empty")
 
     gene_index = load_gene_index(annotation)
     summaries: list[dict[str, object]] = []
     for chrom_dir in _chrom_dirs(input_dir):
+        otari_chrom = None if score_dir is not None else otari_dir / otari_prefix / chrom_dir.name
         summary = _process_chromosome(
             chrom_dir,
-            otari_dir / otari_prefix / chrom_dir.name,
+            otari_chrom,
             prefix,
             people,
             columns,
@@ -135,6 +150,8 @@ def compute_gene_burden(
             n_asd=n_asd,
             n_unaffected_sibling=n_unaffected_sibling,
             output_dir=output_dir,
+            score_dir=score_dir,
+            score_prefix=score_prefix,
         )
         summaries.append(summary)
         print(f"finished processing {chrom_dir.name}", flush=True)
@@ -152,7 +169,7 @@ def compute_gene_burden(
 
 def _process_chromosome(
     chrom_dir: Path,
-    otari_chrom: Path,
+    otari_chrom: Path | None,
     prefix: str,
     people: dict[str, tuple[str, str]],
     columns: list[str],
@@ -164,6 +181,8 @@ def _process_chromosome(
     n_asd: int,
     n_unaffected_sibling: int,
     output_dir: Path | None,
+    score_dir: Path | None = None,
+    score_prefix: str | None = None,
 ) -> dict[str, object]:
     """Spill each shard, then total one gene at a time."""
     spill_root = output_dir / chrom_dir.name if output_dir is not None else Path(tempfile.mkdtemp())
@@ -174,23 +193,43 @@ def _process_chromosome(
         for path, start, end in _shard_files(chrom_dir, prefix):
             genes: dict[str, dict[str, dict[str, object]]] = {}
             rows = list(_iter_variant_rows(path))
-            needed = {_variant_id(chrom, pos, ref, alt) for chrom, pos, ref, alt, _patients in rows}
-            scores = _load_gene_scores(otari_chrom / f"{start}_{end}", needed, columns)
             assigned = _assign_rows(rows, gene_index)
-            for (chrom, pos, ref, alt, carriers), gene_names in zip(rows, assigned):
-                variant_id = _variant_id(chrom, pos, ref, alt)
-                for gene_name in gene_names:
-                    _add_gene_variant(
-                        genes,
-                        people,
-                        columns,
-                        gene_name,
-                        scores.get((variant_id, gene_name)),
-                        carriers,
-                        threshold=threshold,
-                        use_abs=use_abs,
-                        transcripts=transcripts,
-                    )
+            if score_prefix is not None:
+                assert score_dir is not None
+                table = _load_variant_scores(
+                    score_dir / chrom_dir.name / f"{score_prefix}_{start}_{end}.tsv",
+                    columns,
+                )
+                for (chrom, pos, ref, alt, carriers), gene_names in zip(rows, assigned):
+                    column_scores = _lookup_variant_scores(table, chrom, pos, ref, alt)
+                    for gene_name in gene_names:
+                        _add_column_scores(
+                            genes,
+                            people,
+                            columns,
+                            gene_name,
+                            column_scores,
+                            carriers,
+                            threshold=threshold,
+                        )
+            else:
+                assert otari_chrom is not None
+                needed = {_variant_id(chrom, pos, ref, alt) for chrom, pos, ref, alt, _patients in rows}
+                scores = _load_gene_scores(otari_chrom / f"{start}_{end}", needed, columns)
+                for (chrom, pos, ref, alt, carriers), gene_names in zip(rows, assigned):
+                    variant_id = _variant_id(chrom, pos, ref, alt)
+                    for gene_name in gene_names:
+                        _add_gene_variant(
+                            genes,
+                            people,
+                            columns,
+                            gene_name,
+                            scores.get((variant_id, gene_name)),
+                            carriers,
+                            threshold=threshold,
+                            use_abs=use_abs,
+                            transcripts=transcripts,
+                        )
             spill_path = spill_dir / f"{start}_{end}.tsv"
             _write_spill(spill_path, genes, columns)
             spill_paths.append(spill_path)
@@ -589,6 +628,96 @@ def _load_transcript_genes(path: Path, needed: set[str]) -> dict[tuple[str, str]
             if transcript_id and gene_name:
                 mapping[(variant_id, transcript_id)] = gene_name
     return mapping
+
+
+def _load_variant_scores(path: Path, columns: list[str]) -> dict[tuple[str, str, str, str], dict[str, float]]:
+    """Map chromosome, position, ref, and alt to the numeric score columns."""
+    if not path.is_file():
+        return {}
+    scores: dict[tuple[str, str, str, str], dict[str, float]] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        missing = [name for name in ("chrom", "pos", "ref", "alt", *columns) if name not in fieldnames]
+        if missing:
+            raise ValueError(f"{path} is missing columns: {missing}")
+        for line_number, row in enumerate(reader, start=2):
+            chrom = (row.get("chrom") or "").strip()
+            pos = (row.get("pos") or "").strip()
+            ref = (row.get("ref") or "").strip()
+            alt = (row.get("alt") or "").strip()
+            if not chrom or not pos or not ref or not alt:
+                raise ValueError(f"{path}:{line_number} is missing chrom, pos, ref, or alt")
+            values: dict[str, float] = {}
+            for column in columns:
+                cell = (row.get(column) or "").strip()
+                if not cell:
+                    continue
+                try:
+                    values[column] = float(cell)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number} has a non-numeric {column}") from exc
+            for alias in _chrom_aliases(chrom):
+                key = (alias, pos, ref, alt)
+                if key not in scores:
+                    scores[key] = values
+    return scores
+
+
+def _lookup_variant_scores(
+    scores: dict[tuple[str, str, str, str], dict[str, float]],
+    chrom: str,
+    pos: str,
+    ref: str,
+    alt: str,
+) -> dict[str, float] | None:
+    for alias in _chrom_aliases(chrom):
+        found = scores.get((alias, pos, ref, alt))
+        if found is not None:
+            return found
+    return None
+
+
+def _add_column_scores(
+    genes: dict[str, dict[str, dict[str, object]]],
+    people: dict[str, tuple[str, str]],
+    columns: list[str],
+    gene_name: str,
+    column_scores: dict[str, float] | None,
+    carriers: list[str],
+    *,
+    threshold: float,
+) -> None:
+    bucket = genes.setdefault(gene_name, {})
+    for person in dict.fromkeys(carriers):
+        info = people.get(person)
+        if info is None:
+            continue
+        record = bucket.get(person)
+        if record is None:
+            status, family_id = info
+            record = {
+                "status": status,
+                "family_id": family_id,
+                "n_variants": 0,
+                "n_unscored": 0,
+            }
+            for column in columns:
+                record[column] = _empty_column()
+            bucket[person] = record
+        record["n_variants"] = int(record["n_variants"]) + 1
+        if not column_scores:
+            record["n_unscored"] = int(record["n_unscored"]) + 1
+            continue
+        scored = False
+        for column in columns:
+            score = column_scores.get(column)
+            if score is None:
+                continue
+            _add_score(record[column], score, threshold)
+            scored = True
+        if not scored:
+            record["n_unscored"] = int(record["n_unscored"]) + 1
 
 
 def _add_gene_variant(
