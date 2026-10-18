@@ -121,7 +121,7 @@ def test_gene_burden_cohort_and_per_gene_scores(tmp_path: Path):
     output = tmp_path / "out"
     summary = compute_gene_burden(
         source,
-        otari,
+        otari / "inherited",
         annotation,
         "inherited",
         people,
@@ -203,7 +203,7 @@ def test_gene_burden_cli_writes_summary(tmp_path: Path):
             "--input-dir",
             str(source),
             "--otari-dir",
-            str(otari),
+            str(otari / "inherited"),
             "--annotation",
             str(annotation),
             "--output-dir",
@@ -264,7 +264,7 @@ def test_gene_burden_merges_person_across_shards(tmp_path: Path):
     output = tmp_path / "out"
     compute_gene_burden(
         source,
-        otari,
+        otari / "inherited",
         annotation,
         "inherited",
         people,

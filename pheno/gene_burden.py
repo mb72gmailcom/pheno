@@ -92,7 +92,6 @@ def compute_gene_burden(
     n_asd: int,
     n_unaffected_sibling: int,
     output_dir: Path | None = None,
-    otari_prefix: str | None = None,
     score_dir: Path | None = None,
     score_prefix: str | None = None,
 ) -> dict[str, object]:
@@ -128,15 +127,11 @@ def compute_gene_burden(
     else:
         if not otari_dir.is_dir():
             raise ValueError(f"Otari directory not found: {otari_dir}")
-        if otari_prefix is None:
-            otari_prefix = prefix
-        if not otari_prefix:
-            raise ValueError("Otari prefix must not be empty")
 
     gene_index = load_gene_index(annotation)
     summaries: list[dict[str, object]] = []
     for chrom_dir in _chrom_dirs(input_dir):
-        otari_chrom = None if score_dir is not None else otari_dir / otari_prefix / chrom_dir.name
+        otari_chrom = None if score_dir is not None else otari_dir / chrom_dir.name
         summary = _process_chromosome(
             chrom_dir,
             otari_chrom,

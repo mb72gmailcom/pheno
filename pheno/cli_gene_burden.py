@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--otari-dir",
         type=Path,
-        help="Parent of {otari-prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv",
+        help="Parent of chrN/{start}_{end}/variant_effects_comprehensive.tsv",
     )
     parser.add_argument(
         "--score-dir",
@@ -48,11 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--file-pattern",
         required=True,
         help="Input TSV prefix, e.g. inherited or inherited_asd",
-    )
-    parser.add_argument(
-        "--otari-prefix",
-        default=None,
-        help="Otari directory name under --otari-dir. Default: --file-pattern",
     )
     parser.add_argument(
         "--score-prefix",
@@ -117,7 +112,6 @@ def main(argv: list[str] | None = None) -> int:
             n_asd=n_asd,
             n_unaffected_sibling=n_siblings,
             output_dir=args.output_dir,
-            otari_prefix=args.otari_prefix,
             score_dir=args.score_dir,
             score_prefix=args.score_prefix,
         )

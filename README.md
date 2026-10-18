@@ -77,16 +77,15 @@ Per-person Otari burden. For each carried variant, transcript scores are made ab
 pheno-asd-burden \
   --family-file family.tsv \
   --input-dir /path/to/results \
-  --otari-dir /path/to/otari \
+  --otari-dir /path/to/otari/inherited \
   --file-pattern inherited_asd \
-  --otari-prefix inherited \
   --column-map examples/column_map.json \
   --otari-columns max_effect,Brain \
   --threshold 0.5 \
   --output-dir /path/to/burden
 ```
 
-Variant TSVs must be named `{file-pattern}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/{otari-prefix}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. When `--otari-prefix` is omitted, it is the same as `--file-pattern`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. Each chromosome is written to `{output-dir}/chrN/burden.json` as it finishes. `{output-dir}/burden.json` is the sum of those files. Counts and sums are added, `max_score` is the maximum across chromosomes, and `fraction_damaging` is recomputed from the summed `n_damaging` and `n_scored`. A person is left out of a chromosome file when they carry no variant on that chromosome. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
+Variant TSVs must be named `{file-pattern}_{start}_{end}.tsv`. The Otari file for that shard is `{otari-dir}/chrN/{start}_{end}/variant_effects_comprehensive.tsv`. A row `chr21 25019786 G T` matches Otari id `21_25019786_G_T_hg38`. Each chromosome is written to `{output-dir}/chrN/burden.json` as it finishes. `{output-dir}/burden.json` is the sum of those files. Counts and sums are added, `max_score` is the maximum across chromosomes, and `fraction_damaging` is recomputed from the summed `n_damaging` and `n_scored`. A person is left out of a chromosome file when they carry no variant on that chromosome. Each person has `n_variants`, `n_unscored`, and, for every selected column, `n_scored`, `n_damaging`, `fraction_damaging`, `sum_effect`, `sum_damaging`, and `max_score`.
 
 Per-gene Otari burden for ASD children and their unaffected siblings. A variant is assigned to a gene when it falls in the gene body or within 2000 bp of either end. Transcripts are collapsed within that gene.
 
@@ -94,10 +93,9 @@ Per-gene Otari burden for ASD children and their unaffected siblings. A variant 
 pheno-asd-burden-gene \
   --family-file family.tsv \
   --input-dir /path/to/results \
-  --otari-dir /path/to/otari \
+  --otari-dir /path/to/otari/inherited \
   --annotation resources/gencode.v47.basic.annotation.clean.gtf.gz \
   --file-pattern inherited \
-  --otari-prefix inherited \
   --column-map examples/column_map.json \
   --otari-columns max_effect \
   --threshold 0.5 \
