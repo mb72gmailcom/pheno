@@ -402,3 +402,68 @@ def test_gene_burden_score_column(tmp_path: Path):
         ]
     )
     assert both == 1
+
+
+def test_gene_burden_window_and_gene_name(tmp_path: Path):
+    source = tmp_path / "sites"
+    scores = tmp_path / "scores"
+    _write(source / "chr21" / "inherited_1000_5000.tsv", HEADER + "chr21\t2500\t.\tA\tT\tA\n")
+    _write(
+        scores / "chr21" / "variants_enrich_1000_5000.tsv",
+        "chrom\tpos\tref\talt\tag_PHRED\nchr21\t2500\tA\tT\t2.5\n",
+    )
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t1000\t2000\t+\tENSG00000000001\tgene_id "ENSG00000000001.2"; gene_name "DDX";\n',
+        encoding="utf-8",
+    )
+    family = tmp_path / "family.tsv"
+    family.write_text(FAMILY, encoding="utf-8")
+    people, n_asd, n_siblings = load_analysis_groups(family, load_column_map(None))
+    common = dict(
+        threshold=1,
+        use_abs=True,
+        transcripts="max",
+        n_asd=n_asd,
+        n_unaffected_sibling=n_siblings,
+        score_dir=scores,
+        score_prefix="variants_enrich",
+    )
+    inside = tmp_path / "inside"
+    summary = compute_gene_burden(
+        source,
+        None,
+        annotation,
+        "inherited",
+        people,
+        ["ag_PHRED"],
+        output_dir=inside,
+        window=500,
+        **common,
+    )
+    genes = _load_genes(inside / "chr21" / "genes.tsv.gz")
+    assert set(genes["genes"]) == {"ENSG00000000001"}
+    with gzip.open(inside / "chr21" / "genes.tsv.gz", "rt", encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle, delimiter="\t"))
+    assert row["gene"] == "ENSG00000000001"
+    assert row["gene_name"] == "DDX"
+    assert summary["window"] == 500
+    assert summary["genes"]["ENSG00000000001"]["gene_name"] == "DDX"
+    assert summary["genes"]["ENSG00000000001"]["asd"]["ag_PHRED"]["mean_sum_effect"] == pytest.approx(2.5)
+
+    outside = tmp_path / "outside"
+    summary = compute_gene_burden(
+        source,
+        None,
+        annotation,
+        "inherited",
+        people,
+        ["ag_PHRED"],
+        output_dir=outside,
+        window=0,
+        **common,
+    )
+    assert summary["genes"] == {}
+    with gzip.open(outside / "chr21" / "genes.tsv.gz", "rt", encoding="utf-8", newline="") as handle:
+        assert list(csv.DictReader(handle, delimiter="\t")) == []

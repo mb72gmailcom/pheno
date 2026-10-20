@@ -70,7 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated columns in the score TSV. Required with --score-dir",
     )
-    parser.add_argument("--threshold", required=True, type=float, help="Damaging when the collapsed score is greater than this value")
+    parser.add_argument("--threshold", required=True, type=float, help="Damaging when the score is greater than this value")
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=2000,
+        help="Base pairs past each end of the gene. The gene body is included. Default: 2000",
+    )
     parser.add_argument(
         "--abs",
         action=argparse.BooleanOptionalAction,
@@ -114,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             score_dir=args.score_dir,
             score_prefix=args.score_prefix,
+            window=args.window,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
