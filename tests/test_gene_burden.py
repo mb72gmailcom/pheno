@@ -415,7 +415,7 @@ def test_gene_burden_window_and_gene_name(tmp_path: Path):
     annotation = tmp_path / "genes.tsv"
     annotation.write_text(
         "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
-        'gene\tchr21\t1000\t2000\t+\tENSG00000000001\tgene_id "ENSG00000000001.2"; gene_name "DDX";\n',
+        'gene\tchr21\t1000\t2000\t+\tENSG00000000001\tgene_id "ENSG00000000001.2"; gene_type "protein_coding"; gene_name "DDX";\n',
         encoding="utf-8",
     )
     family = tmp_path / "family.tsv"
@@ -448,8 +448,10 @@ def test_gene_burden_window_and_gene_name(tmp_path: Path):
         row = next(csv.DictReader(handle, delimiter="\t"))
     assert row["gene"] == "ENSG00000000001"
     assert row["gene_name"] == "DDX"
+    assert row["gene_type"] == "protein_coding"
     assert summary["window"] == 500
     assert summary["genes"]["ENSG00000000001"]["gene_name"] == "DDX"
+    assert summary["genes"]["ENSG00000000001"]["gene_type"] == "protein_coding"
     assert summary["genes"]["ENSG00000000001"]["asd"]["ag_PHRED"]["mean_sum_effect"] == pytest.approx(2.5)
 
     outside = tmp_path / "outside"

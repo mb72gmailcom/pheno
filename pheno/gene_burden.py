@@ -131,7 +131,7 @@ def compute_gene_burden(
         if not otari_dir.is_dir():
             raise ValueError(f"Otari directory not found: {otari_dir}")
 
-    gene_index, gene_names = load_gene_index(annotation, window)
+    gene_index, gene_names, gene_types = load_gene_index(annotation, window)
     summaries: list[dict[str, object]] = []
     for chrom_dir in _chrom_dirs(input_dir):
         otari_chrom = None if score_dir is not None else otari_dir / chrom_dir.name
@@ -151,6 +151,7 @@ def compute_gene_burden(
             score_dir=score_dir,
             score_prefix=score_prefix,
             gene_names=gene_names,
+            gene_types=gene_types,
             window=window,
         )
         summaries.append(summary)
@@ -184,6 +185,7 @@ def _process_chromosome(
     score_dir: Path | None = None,
     score_prefix: str | None = None,
     gene_names: dict[str, str] | None = None,
+    gene_types: dict[str, str] | None = None,
     window: int = _WINDOW,
 ) -> dict[str, object]:
     """Spill each shard, then total one gene at a time."""
@@ -245,6 +247,7 @@ def _process_chromosome(
             n_unaffected_sibling=n_unaffected_sibling,
             chrom_out=None if output_dir is None else output_dir / chrom_dir.name,
             gene_names=gene_names or {},
+            gene_types=gene_types or {},
             window=window,
         )
     finally:
@@ -313,6 +316,7 @@ def _write_chromosome_from_spills(
     n_unaffected_sibling: int,
     chrom_out: Path | None,
     gene_names: dict[str, str] | None = None,
+    gene_types: dict[str, str] | None = None,
     window: int = _WINDOW,
 ) -> dict[str, object]:
     summary_genes: dict[str, object] = {}
@@ -339,9 +343,17 @@ def _write_chromosome_from_spills(
     try:
         for gene, people in _iter_genes(spill_paths, columns):
             if writer is not None:
-                _write_gene_rows(writer, gene, people, columns, (gene_names or {}).get(gene, ""))
+                _write_gene_rows(
+                    writer,
+                    gene,
+                    people,
+                    columns,
+                    (gene_names or {}).get(gene, ""),
+                    (gene_types or {}).get(gene, ""),
+                )
             summary_genes[gene] = {
                 "gene_name": (gene_names or {}).get(gene, ""),
+                "gene_type": (gene_types or {}).get(gene, ""),
                 "asd": _group_summary(people, "asd", n_asd, columns),
                 "unaffected_sibling": _group_summary(people, "unaffected", n_unaffected_sibling, columns),
             }
@@ -360,7 +372,7 @@ def _write_chromosome_from_spills(
 
 
 def _genes_tsv_fields(columns: list[str]) -> list[str]:
-    fields = ["gene", "gene_name", "person", "status", "family_id", "n_variants", "n_unscored"]
+    fields = ["gene", "gene_name", "gene_type", "person", "status", "family_id", "n_variants", "n_unscored"]
     for column in columns:
         fields.extend(
             [
@@ -382,12 +394,14 @@ def _write_gene_rows(
     people: dict[str, dict[str, object]],
     columns: list[str],
     gene_label: str,
+    gene_type: str,
 ) -> None:
     for person in sorted(people):
         record = people[person]
         row: dict[str, object] = {
             "gene": gene,
             "gene_name": gene_label,
+            "gene_type": gene_type,
             "person": person,
             "status": record["status"],
             "family_id": record["family_id"],
@@ -467,7 +481,10 @@ def _record_from_spill(row: dict[str, str], columns: list[str]) -> dict[str, obj
     return record
 
 
-def load_gene_index(path: Path, window: int = _WINDOW) -> tuple[dict[str, list[tuple[int, int, str]]], dict[str, str]]:
+def load_gene_index(
+    path: Path,
+    window: int = _WINDOW,
+) -> tuple[dict[str, list[tuple[int, int, str]]], dict[str, str], dict[str, str]]:
     if not path.is_file():
         raise ValueError(f"annotation not found: {path}")
     if window < 0:
@@ -475,6 +492,7 @@ def load_gene_index(path: Path, window: int = _WINDOW) -> tuple[dict[str, list[t
     opener = gzip.open if path.suffix == ".gz" else open
     indexed: dict[str, list[tuple[int, int, str]]] = {}
     gene_names: dict[str, str] = {}
+    gene_types: dict[str, str] = {}
     with opener(path, "rt", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         fieldnames = reader.fieldnames or []
@@ -486,7 +504,7 @@ def load_gene_index(path: Path, window: int = _WINDOW) -> tuple[dict[str, list[t
         for line_number, row in enumerate(reader, start=2):
             if (row.get("feature") or "").strip() != "gene":
                 continue
-            gene_id, gene_label = _gene_identity(row)
+            gene_id, gene_label, gene_type = _gene_identity(row)
             chrom = (row.get("chr") or "").strip()
             if not gene_id or not chrom:
                 raise ValueError(f"{path}:{line_number} gene row is missing chr or gene id")
@@ -497,6 +515,7 @@ def load_gene_index(path: Path, window: int = _WINDOW) -> tuple[dict[str, list[t
                 raise ValueError(f"{path}:{line_number} has a non-integer coordinate") from exc
             if gene_id not in gene_names:
                 gene_names[gene_id] = gene_label
+                gene_types[gene_id] = gene_type
             strand = (row.get("strand") or "").strip()
             for key in _chrom_aliases(chrom):
                 bucket = indexed.setdefault(key, [])
@@ -506,17 +525,17 @@ def load_gene_index(path: Path, window: int = _WINDOW) -> tuple[dict[str, list[t
         raise ValueError(f"no gene rows in {path}")
     for intervals in indexed.values():
         intervals.sort()
-    return indexed, gene_names
+    return indexed, gene_names, gene_types
 
 
-def _gene_identity(row: dict[str, str]) -> tuple[str, str]:
+def _gene_identity(row: dict[str, str]) -> tuple[str, str, str]:
     attributes = (row.get("attributes") or "").strip()
     if attributes:
         attrs = _parse_attributes(attributes)
         gene_id = _unversioned_gene_id(attrs.get("gene_id", ""))
         if gene_id:
-            return gene_id, attrs.get("gene_name", "")
-    return (row.get("name") or "").strip(), ""
+            return gene_id, attrs.get("gene_name", ""), attrs.get("gene_type", "")
+    return (row.get("name") or "").strip(), "", ""
 
 
 def _parse_attributes(raw: str) -> dict[str, str]:
@@ -999,6 +1018,7 @@ def _combine_summaries(
                 continue
             genes[str(gene)] = {
                 "gene_name": current.get("gene_name") or groups.get("gene_name") or "",
+                "gene_type": current.get("gene_type") or groups.get("gene_type") or "",
                 "asd": _merge_summary_group(current["asd"], groups["asd"], n_asd, columns),
                 "unaffected_sibling": _merge_summary_group(
                     current["unaffected_sibling"],
