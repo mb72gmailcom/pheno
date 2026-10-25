@@ -17,6 +17,9 @@ C	F2	mom2	dad2	male	2
 D	F2	mom2	dad2	female	1
 E	F3	mom3	dad3	male	1
 U	F1	mom1	dad1	male	1
+P	F5	mom5	dad5	male	2
+Q	F5	mom5	dad5	female	1
+S	F6	mom6	dad6	male	2
 """
 HEADER = "#CHROM\tPOS\tID\tREF\tALT\tTRIO_CALLS\n"
 
@@ -45,10 +48,10 @@ def _run(tmp_path: Path, body: str) -> list[dict[str, str]]:
 def test_pair_and_asymmetric_family(tmp_path: Path):
     rows = _run(
         tmp_path,
-        "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99;B=0/1|0/0|0/0|99;"
+        "chr21\t10\t.\tG\tA\tP=0/0|0/1|0/1|99;Q=0/1|0/0|0/0|99;"
         "C=0/0|0/1|0/1|99;D=0/1|0/0|0/0|99\n"
         "chr21\t20\t.\tT\tC\tA=0/1|0/1|0/0|99;B=0/0|0/1|0/1|99;U=0/0|0/1|0/1|99\n"
-        "chr21\t30\t.\tC\tG\tA=0/0|0/1|0/1|99;B=0/1|0/0|0/1|99\n",
+        "chr21\t30\t.\tC\tG\tA=0/0|0/1|0/1|99;B=0/1|0/0|0/1|99;U=0/0|0/1|0/1|99\n",
     )
     by_pos = {row["POS"]: row for row in rows}
     assert set(by_pos) == {"10", "20", "30"}
@@ -72,9 +75,18 @@ def test_pair_and_asymmetric_family(tmp_path: Path):
     assert float(tied["p_exact"]) == pytest.approx(1)
 
 
-def test_missing_sibling_is_not_reference(tmp_path: Path):
-    rows = _run(tmp_path, "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
-    assert rows == []
+def test_absent_sibling_is_reference(tmp_path: Path):
+    rows = _run(
+        tmp_path,
+        "chr21\t10\t.\tG\tA\tC=0/0|0/1|0/1|99\n"
+        "chr21\t20\t.\tG\tA\tD=0/1|0/0|0/1|99\n",
+    )
+    by_pos = {row["POS"]: row for row in rows}
+    assert by_pos["10"]["n_families"] == "1"
+    assert by_pos["10"]["n_informative"] == "1"
+    assert float(by_pos["10"]["z"]) == pytest.approx(1)
+    assert float(by_pos["10"]["p_exact"]) == pytest.approx(1)
+    assert float(by_pos["20"]["z"]) == pytest.approx(-1)
 
 
 def test_multiallelic_variant_is_skipped(tmp_path: Path):
@@ -82,7 +94,7 @@ def test_multiallelic_variant_is_skipped(tmp_path: Path):
         tmp_path,
         "chr21\t10\t.\tG\tA,C\tA=0/0|0/1|0/1|99;B=0/1|0/0|0/0|99\n"
         "chr21\t20\t.\tG\tA\tA=0/0|0/1|1/2|99;B=0/1|0/0|0/0|99\n"
-        "chr21\t30\t.\tG\tA\tA=0/0|1/1|0/1|99;B=1/1|0/0|0/0|99\n",
+        "chr21\t30\t.\tG\tA\tC=0/0|1/1|0/1|99;D=1/1|0/0|0/0|99\n",
     )
     assert [row["POS"] for row in rows] == ["30"]
     assert float(rows[0]["z"]) == pytest.approx(1)
@@ -92,7 +104,7 @@ def test_multiallelic_variant_is_skipped(tmp_path: Path):
 def test_three_field_genotype_uses_child(tmp_path: Path):
     rows = _run(
         tmp_path,
-        "chr21\t10\t.\tG\tA\tA=0/1|0/1|99;B=0/0|0/0|99\n",
+        "chr21\t10\t.\tG\tA\tC=0/1|0/1|99;D=0/0|0/0|99\n",
     )
     assert rows[0]["n_informative"] == "1"
     assert float(rows[0]["z"]) == pytest.approx(1)
@@ -136,7 +148,7 @@ def test_output_dir_writes_one_sorted_file_per_chromosome(tmp_path: Path):
         source / "chr22" / "inherited_10_20.tsv",
         "chr22\t15\t.\tA\tG\tC=0/0|0/1|0/1|99;D=0/1|0/0|0/0|99\n",
     )
-    _write(source / "chrX" / "inherited_1_2.tsv", "chrX\t5\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chrX" / "inherited_1_2.tsv", "chrX\t5\t.\tA\tG\tS=0/0|0/1|0/1|99\n")
     family = tmp_path / "family.tsv"
     family.write_text(FAMILY, encoding="utf-8")
     people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))

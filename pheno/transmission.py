@@ -46,8 +46,8 @@ def compute_transmission(
 
     ``output`` is one TSV. ``output_dir`` writes ``chrN/{prefix}.tsv``, with
     the rows of each chromosome ordered by position. Exactly one of the two
-    paths is set. A child contributes only when that child is listed on the
-    variant row. Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic
+    paths is set. A sibling in a touched family who is absent from the row is
+    dosage 0. Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic
     variants are skipped. ``z`` is blank when no family is informative, and
     ``p_exact`` is then 1.
     """
@@ -76,6 +76,7 @@ def compute_transmission(
     seen: set[tuple[str, str, str, str]] = set()
     pending: list[dict[str, object]] = []
     current_chrom = ""
+    members = _members_by_family(people)
     try:
         for path in files:
             chrom_name = path.parent.name
@@ -93,7 +94,7 @@ def compute_transmission(
                 if key in seen:
                     raise ValueError(f"duplicate variant {chrom} {pos} {ref} {alt}")
                 seen.add(key)
-                result = _variant_result(calls, people)
+                result = _variant_result(calls, people, members)
                 if result is None:
                     continue
                 n_families, n_informative, z, p_exact = result
@@ -146,21 +147,33 @@ def _flush_chromosome(
     return count
 
 
+def _members_by_family(
+    people: dict[str, tuple[str, str]],
+) -> dict[str, list[tuple[str, bool]]]:
+    members: dict[str, list[tuple[str, bool]]] = defaultdict(list)
+    for person, (status, family_id) in people.items():
+        members[family_id].append((person, status == "asd"))
+    return members
+
+
 def _variant_result(
     calls: list[tuple[str, int]],
     people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
 ) -> tuple[int, int, float | None, float] | None:
-    grouped: dict[str, list[tuple[bool, int]]] = defaultdict(list)
-    seen_people: set[str] = set()
+    listed: dict[str, int] = {}
     for person, dosage in calls:
-        info = people.get(person)
-        if info is None or person in seen_people:
+        if person not in people or person in listed:
             continue
-        seen_people.add(person)
-        status, family_id = info
-        grouped[family_id].append((status == "asd", dosage))
-
-    families = [family for records in grouped.values() if (family := _family_contrast(records)) is not None]
+        listed[person] = dosage
+    if not listed:
+        return None
+    families = []
+    for family_id in {people[person][1] for person in listed}:
+        records = [(is_asd, listed.get(person, 0)) for person, is_asd in members[family_id]]
+        family = _family_contrast(records)
+        if family is not None:
+            families.append(family)
     if not families:
         return None
     informative = [family for family in families if family[2] is not None]
