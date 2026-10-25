@@ -123,3 +123,45 @@ def test_patients_column_is_rejected(tmp_path: Path, capsys):
     assert code == 1
     assert "requires a TRIO_CALLS column" in capsys.readouterr().err
     assert not output.exists()
+
+
+def test_output_dir_writes_one_sorted_file_per_chromosome(tmp_path: Path):
+    source = tmp_path / "results"
+    pair = "A=0/0|0/1|0/1|99;B=0/1|0/0|0/0|99"
+    _write(
+        source / "chr21" / "inherited_200_300.tsv",
+        f"chr21\t250\t.\tG\tA\t{pair}\nchr21\t30\t.\tC\tT\t{pair}\n",
+    )
+    _write(
+        source / "chr22" / "inherited_10_20.tsv",
+        "chr22\t15\t.\tA\tG\tC=0/0|0/1|0/1|99;D=0/1|0/0|0/0|99\n",
+    )
+    _write(source / "chrX" / "inherited_1_2.tsv", "chrX\t5\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    family.write_text(FAMILY, encoding="utf-8")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    written = compute_transmission(source, "inherited", people, output_dir=output_dir)
+    assert written == 3
+    assert [row["POS"] for row in _rows(output_dir / "chr21" / "inherited.tsv")] == ["30", "250"]
+    assert [row["POS"] for row in _rows(output_dir / "chr22" / "inherited.tsv")] == ["15"]
+    assert not (output_dir / "chrX").exists()
+
+
+def test_output_and_output_dir_are_exclusive(tmp_path: Path, capsys):
+    family = tmp_path / "family.tsv"
+    family.write_text(FAMILY, encoding="utf-8")
+    shared = [
+        "--family-file",
+        str(family),
+        "--input-dir",
+        str(tmp_path),
+        "--file-pattern",
+        "inherited",
+    ]
+    neither = main(shared)
+    assert neither == 1
+    assert "exactly one of --output and --output-dir" in capsys.readouterr().err
+    both = main([*shared, "--output", "out.tsv", "--output-dir", "out"])
+    assert both == 1
+    assert "exactly one of --output and --output-dir" in capsys.readouterr().err

@@ -38,15 +38,21 @@ def compute_transmission(
     input_dir: Path,
     prefix: str,
     people: dict[str, tuple[str, str]],
-    output: Path,
+    output: Path | None = None,
+    *,
+    output_dir: Path | None = None,
 ) -> int:
     """Write one row for each variant seen in an ASD and unaffected sibship.
 
-    A child contributes only when that child is listed on the variant row.
-    Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic variants are
-    skipped. ``z`` is blank when no family is informative, and ``p_exact`` is
-    then 1.
+    ``output`` is one TSV. ``output_dir`` writes ``chrN/{prefix}.tsv``, with
+    the rows of each chromosome ordered by position. Exactly one of the two
+    paths is set. A child contributes only when that child is listed on the
+    variant row. Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic
+    variants are skipped. ``z`` is blank when no family is informative, and
+    ``p_exact`` is then 1.
     """
+    if (output is None) == (output_dir is None):
+        raise ValueError("set exactly one of --output and --output-dir")
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
     if not prefix:
@@ -55,19 +61,30 @@ def compute_transmission(
     for path in files:
         _require_trio_header(path)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    seen: set[tuple[str, str, str, str]] = set()
-    current_chrom = ""
-    with output.open("w", encoding="utf-8", newline="") as handle:
+    handle = None
+    writer: csv.DictWriter | None = None
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        handle = output.open("w", encoding="utf-8", newline="")
         writer = csv.DictWriter(handle, fieldnames=_FIELDS, delimiter="\t", lineterminator="\n")
         writer.writeheader()
+    else:
+        assert output_dir is not None
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    seen: set[tuple[str, str, str, str]] = set()
+    pending: list[dict[str, object]] = []
+    current_chrom = ""
+    try:
         for path in files:
-            chrom = path.parent.name
-            if chrom != current_chrom:
+            chrom_name = path.parent.name
+            if chrom_name != current_chrom:
+                written += _flush_chromosome(current_chrom, pending, prefix, writer, output_dir)
                 if current_chrom:
                     print(f"finished processing {current_chrom}", flush=True)
-                current_chrom = chrom
+                current_chrom = chrom_name
+                seen.clear()
             for row in _iter_rows(path):
                 if row is None:
                     continue
@@ -80,7 +97,7 @@ def compute_transmission(
                 if result is None:
                     continue
                 n_families, n_informative, z, p_exact = result
-                writer.writerow(
+                pending.append(
                     {
                         "CHROM": chrom,
                         "POS": pos,
@@ -93,10 +110,40 @@ def compute_transmission(
                         "p_exact": format(p_exact, ".12g"),
                     }
                 )
-                written += 1
+        written += _flush_chromosome(current_chrom, pending, prefix, writer, output_dir)
         if current_chrom:
             print(f"finished processing {current_chrom}", flush=True)
+    finally:
+        if handle is not None:
+            handle.close()
     return written
+
+
+def _flush_chromosome(
+    chrom: str,
+    pending: list[dict[str, object]],
+    prefix: str,
+    writer: csv.DictWriter | None,
+    output_dir: Path | None,
+) -> int:
+    if not chrom:
+        return 0
+    pending.sort(key=lambda row: (int(str(row["POS"])), str(row["REF"]), str(row["ALT"]), str(row["ID"])))
+    count = len(pending)
+    if output_dir is not None:
+        if pending:
+            path = output_dir / chrom / f"{prefix}.tsv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                chrom_writer = csv.DictWriter(
+                    handle, fieldnames=_FIELDS, delimiter="\t", lineterminator="\n"
+                )
+                chrom_writer.writeheader()
+                chrom_writer.writerows(pending)
+    elif writer is not None:
+        writer.writerows(pending)
+    pending.clear()
+    return count
 
 
 def _variant_result(
