@@ -10,6 +10,8 @@ from fractions import Fraction
 from itertools import combinations
 from pathlib import Path
 
+from pheno.gene_burden import _genes_at, _intervals_for, load_gene_index
+
 _CHROM_DIR = re.compile(r"^chr(\d+|X|Y)$")
 _DOSAGE = {
     "0/0": 0,
@@ -32,6 +34,24 @@ _FIELDS = [
     "z",
     "p_exact",
 ]
+_GENE_FIELDS = [
+    "CHROM",
+    "gene",
+    "gene_name",
+    "gene_type",
+    "n_variants",
+    "n_families",
+    "n_informative",
+    "z",
+    "p_exact",
+]
+_DEFAULT_WINDOW = 2000
+
+
+def gene_table_path(output: Path) -> Path:
+    """Path of the gene table written beside a single variant ``output`` file."""
+    suffix = output.suffix or ".tsv"
+    return output.with_name(f"{output.stem}.genes{suffix}")
 
 
 def compute_transmission(
@@ -41,7 +61,9 @@ def compute_transmission(
     output: Path | None = None,
     *,
     output_dir: Path | None = None,
-) -> int:
+    genes: Path | None = None,
+    window: int = _DEFAULT_WINDOW,
+) -> tuple[int, int]:
     """Write one row for each variant seen in an ASD and unaffected sibship.
 
     ``output`` is one TSV. ``output_dir`` writes ``chrN/{prefix}.tsv``, with
@@ -49,7 +71,8 @@ def compute_transmission(
     paths is set. A sibling in a touched family who is absent from the row is
     dosage 0. Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic
     variants are skipped. ``z`` is blank when no family is informative, and
-    ``p_exact`` is then 1.
+    ``p_exact`` is then 1. When ``genes`` is set, each gene sums those dosages
+    and is tested with one label shuffle per family.
     """
     if (output is None) == (output_dir is None):
         raise ValueError("set exactly one of --output and --output-dir")
@@ -60,28 +83,56 @@ def compute_transmission(
     files = _discover(input_dir, prefix)
     for path in files:
         _require_trio_header(path)
+    gene_index = gene_names = gene_types = None
+    if genes is not None:
+        gene_index, gene_names, gene_types = load_gene_index(genes, window)
 
     handle = None
+    gene_handle = None
     writer: csv.DictWriter | None = None
+    gene_writer: csv.DictWriter | None = None
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         handle = output.open("w", encoding="utf-8", newline="")
         writer = csv.DictWriter(handle, fieldnames=_FIELDS, delimiter="\t", lineterminator="\n")
         writer.writeheader()
+        if gene_index is not None:
+            gene_handle = gene_table_path(output).open("w", encoding="utf-8", newline="")
+            gene_writer = csv.DictWriter(
+                gene_handle, fieldnames=_GENE_FIELDS, delimiter="\t", lineterminator="\n"
+            )
+            gene_writer.writeheader()
     else:
         assert output_dir is not None
         output_dir.mkdir(parents=True, exist_ok=True)
 
     written = 0
+    gene_written = 0
     seen: set[tuple[str, str, str, str]] = set()
     pending: list[dict[str, object]] = []
+    gene_records: list[tuple[int, dict[str, int]]] = []
     current_chrom = ""
     members = _members_by_family(people)
     try:
         for path in files:
             chrom_name = path.parent.name
             if chrom_name != current_chrom:
-                written += _flush_chromosome(current_chrom, pending, prefix, writer, output_dir)
+                variants, gene_rows = _flush_chromosome(
+                    current_chrom,
+                    pending,
+                    gene_records,
+                    prefix,
+                    writer,
+                    gene_writer,
+                    output_dir,
+                    gene_index,
+                    gene_names or {},
+                    gene_types or {},
+                    people,
+                    members,
+                )
+                written += variants
+                gene_written += gene_rows
                 if current_chrom:
                     print(f"finished processing {current_chrom}", flush=True)
                 current_chrom = chrom_name
@@ -94,7 +145,10 @@ def compute_transmission(
                 if key in seen:
                     raise ValueError(f"duplicate variant {chrom} {pos} {ref} {alt}")
                 seen.add(key)
-                result = _variant_result(calls, people, members)
+                listed = _cohort_dosages(calls, people)
+                if gene_index is not None and listed:
+                    gene_records.append((int(pos), listed))
+                result = _contrast(listed, people, members)
                 if result is None:
                     continue
                 n_families, n_informative, z, p_exact = result
@@ -111,24 +165,48 @@ def compute_transmission(
                         "p_exact": format(p_exact, ".12g"),
                     }
                 )
-        written += _flush_chromosome(current_chrom, pending, prefix, writer, output_dir)
+        variants, gene_rows = _flush_chromosome(
+            current_chrom,
+            pending,
+            gene_records,
+            prefix,
+            writer,
+            gene_writer,
+            output_dir,
+            gene_index,
+            gene_names or {},
+            gene_types or {},
+            people,
+            members,
+        )
+        written += variants
+        gene_written += gene_rows
         if current_chrom:
             print(f"finished processing {current_chrom}", flush=True)
     finally:
         if handle is not None:
             handle.close()
-    return written
+        if gene_handle is not None:
+            gene_handle.close()
+    return written, gene_written
 
 
 def _flush_chromosome(
     chrom: str,
     pending: list[dict[str, object]],
+    gene_records: list[tuple[int, dict[str, int]]],
     prefix: str,
     writer: csv.DictWriter | None,
+    gene_writer: csv.DictWriter | None,
     output_dir: Path | None,
-) -> int:
+    gene_index: dict[str, list[tuple[int, int, str]]] | None,
+    gene_names: dict[str, str],
+    gene_types: dict[str, str],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+) -> tuple[int, int]:
     if not chrom:
-        return 0
+        return 0, 0
     pending.sort(key=lambda row: (int(str(row["POS"])), str(row["REF"]), str(row["ALT"]), str(row["ID"])))
     count = len(pending)
     if output_dir is not None:
@@ -144,7 +222,26 @@ def _flush_chromosome(
     elif writer is not None:
         writer.writerows(pending)
     pending.clear()
-    return count
+    gene_count = 0
+    if gene_index is not None:
+        gene_rows = _gene_rows(
+            chrom, gene_records, gene_index, gene_names, gene_types, people, members
+        )
+        gene_count = len(gene_rows)
+        if output_dir is not None:
+            if gene_rows:
+                path = output_dir / chrom / f"{prefix}.genes.tsv"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    chrom_writer = csv.DictWriter(
+                        handle, fieldnames=_GENE_FIELDS, delimiter="\t", lineterminator="\n"
+                    )
+                    chrom_writer.writeheader()
+                    chrom_writer.writerows(gene_rows)
+        elif gene_writer is not None:
+            gene_writer.writerows(gene_rows)
+    gene_records.clear()
+    return count, gene_count
 
 
 def _members_by_family(
@@ -156,16 +253,23 @@ def _members_by_family(
     return members
 
 
-def _variant_result(
+def _cohort_dosages(
     calls: list[tuple[str, int]],
     people: dict[str, tuple[str, str]],
-    members: dict[str, list[tuple[str, bool]]],
-) -> tuple[int, int, float | None, float] | None:
+) -> dict[str, int]:
     listed: dict[str, int] = {}
     for person, dosage in calls:
         if person not in people or person in listed:
             continue
         listed[person] = dosage
+    return listed
+
+
+def _contrast(
+    listed: dict[str, int],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+) -> tuple[int, int, float | None, float] | None:
     if not listed:
         return None
     families = []
@@ -182,6 +286,54 @@ def _variant_result(
     z = None if variance == 0 else float(total) / math.sqrt(float(variance))
     p_exact = 1.0 if not informative else float(_exact_tail(informative, total))
     return len(families), len(informative), z, p_exact
+
+
+def _gene_rows(
+    chrom: str,
+    records: list[tuple[int, dict[str, int]]],
+    gene_index: dict[str, list[tuple[int, int, str]]],
+    gene_names: dict[str, str],
+    gene_types: dict[str, str],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+) -> list[dict[str, object]]:
+    if not records:
+        return []
+    records.sort(key=lambda item: item[0])
+    intervals = _intervals_for(chrom, gene_index)
+    if not intervals:
+        return []
+    assigned = _genes_at([pos for pos, _dosages in records], intervals)
+    sums: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    counts: dict[str, int] = defaultdict(int)
+    first_pos: dict[str, int] = {}
+    for (pos, dosages), gene_ids in zip(records, assigned):
+        for gene_id in gene_ids:
+            counts[gene_id] += 1
+            if gene_id not in first_pos or pos < first_pos[gene_id]:
+                first_pos[gene_id] = pos
+            for person, dosage in dosages.items():
+                sums[gene_id][person] += dosage
+    rows: list[dict[str, object]] = []
+    for gene_id in sorted(counts, key=lambda gene: (first_pos[gene], gene)):
+        result = _contrast(sums[gene_id], people, members)
+        if result is None:
+            continue
+        n_families, n_informative, z, p_exact = result
+        rows.append(
+            {
+                "CHROM": chrom,
+                "gene": gene_id,
+                "gene_name": gene_names.get(gene_id, ""),
+                "gene_type": gene_types.get(gene_id, ""),
+                "n_variants": counts[gene_id],
+                "n_families": n_families,
+                "n_informative": n_informative,
+                "z": "" if z is None else format(z, ".12g"),
+                "p_exact": format(p_exact, ".12g"),
+            }
+        )
+    return rows
 
 
 def _family_contrast(

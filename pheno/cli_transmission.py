@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pheno.gene_burden import load_analysis_groups
 from pheno.mapping import load_column_map
-from pheno.transmission import compute_transmission
+from pheno.transmission import compute_transmission, gene_table_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="JSON map of family-file column names and ASD value aliases",
     )
+    parser.add_argument(
+        "--genes",
+        default=None,
+        type=Path,
+        help="Annotation table. Also write a gene-level dosage contrast",
+    )
+    parser.add_argument(
+        "--window",
+        default=None,
+        type=int,
+        help="Bases past both ends of a gene when --genes is set (default 2000)",
+    )
     return parser
 
 
@@ -66,21 +78,30 @@ def main(argv: list[str] | None = None) -> int:
     if (args.output is None) == (args.output_dir is None):
         print("error: set exactly one of --output and --output-dir", file=sys.stderr)
         return 1
+    if args.window is not None and args.genes is None:
+        print("error: --window requires --genes", file=sys.stderr)
+        return 1
     try:
         column_map = load_column_map(args.column_map)
         people, _n_asd, _n_siblings = load_analysis_groups(args.family_file, column_map)
-        written = compute_transmission(
+        written, gene_written = compute_transmission(
             args.input_dir,
             args.file_pattern,
             people,
             args.output,
             output_dir=args.output_dir,
+            genes=args.genes,
+            window=2000 if args.window is None else args.window,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     destination = args.output if args.output is not None else args.output_dir
-    print(f"Wrote {written} variants to {destination}")
+    if args.genes is None:
+        print(f"Wrote {written} variants to {destination}")
+    else:
+        gene_destination = gene_table_path(args.output) if args.output is not None else args.output_dir
+        print(f"Wrote {written} variants to {destination} and {gene_written} genes to {gene_destination}")
     return 0
 
 

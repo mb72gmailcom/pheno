@@ -153,11 +153,63 @@ def test_output_dir_writes_one_sorted_file_per_chromosome(tmp_path: Path):
     family.write_text(FAMILY, encoding="utf-8")
     people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
     output_dir = tmp_path / "by-chrom"
-    written = compute_transmission(source, "inherited", people, output_dir=output_dir)
+    written, gene_count = compute_transmission(source, "inherited", people, output_dir=output_dir)
     assert written == 3
+    assert gene_count == 0
     assert [row["POS"] for row in _rows(output_dir / "chr21" / "inherited.tsv")] == ["30", "250"]
     assert [row["POS"] for row in _rows(output_dir / "chr22" / "inherited.tsv")] == ["15"]
     assert not (output_dir / "chrX").exists()
+
+
+def test_gene_sums_three_variants_and_shuffles_once(tmp_path: Path):
+    source = tmp_path / "results"
+    _write(
+        source / "chr21" / "inherited_1000_2000.tsv",
+        "chr21\t900\t.\tG\tA\tA=0/0|0/1|1/1|99\n"
+        "chr21\t1100\t.\tG\tA\tA=0/0|0/1|0/1|99;C=0/0|0/1|0/1|99\n"
+        "chr21\t1500\t.\tT\tC\tA=0/1|0/1|1/1|99;B=0/0|0/1|0/1|99;"
+        "D=0/0|0/1|0/1|99;E=0/0|0/1|0/1|99\n"
+        "chr21\t1800\t.\tC\tG\tB=0/0|0/1|0/1|99;C=0/0|0/1|0/1|99\n",
+    )
+    family = tmp_path / "family.tsv"
+    family.write_text(
+        "person\tfamily\tmother\tfather\tsex\tasd\n"
+        "A\tF1\tmom1\tdad1\tmale\t2\n"
+        "B\tF1\tmom1\tdad1\tfemale\t1\n"
+        "C\tF2\tmom2\tdad2\tmale\t2\n"
+        "D\tF2\tmom2\tdad2\tfemale\t1\n"
+        "E\tF2\tmom2\tdad2\tmale\t1\n",
+        encoding="utf-8",
+    )
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t1000\t2000\t+\tGENE1\tgene_id "ENSG00000000001.2"; '
+        'gene_type "protein_coding"; gene_name "AAA";\n',
+        encoding="utf-8",
+    )
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    _variants, gene_count = compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+    )
+    assert gene_count == 1
+    rows = _rows(output_dir / "chr21" / "inherited.genes.tsv")
+    assert len(rows) == 1
+    gene = rows[0]
+    assert gene["gene"] == "ENSG00000000001"
+    assert gene["gene_name"] == "AAA"
+    assert gene["gene_type"] == "protein_coding"
+    assert gene["n_variants"] == "3"
+    assert gene["n_families"] == "2"
+    assert gene["n_informative"] == "2"
+    assert float(gene["z"]) == pytest.approx(2 / math.sqrt(1.5))
+    assert float(gene["p_exact"]) == pytest.approx(1 / 6)
 
 
 def test_output_and_output_dir_are_exclusive(tmp_path: Path, capsys):
