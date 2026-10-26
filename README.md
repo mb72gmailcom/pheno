@@ -84,6 +84,21 @@ pheno-asd-transmission \
 
 `--output` writes every chromosome into that one file. `--output-dir` writes one file per chromosome, `chrN/inherited.tsv`, ordered by position. Set exactly one of the two. The columns are `CHROM`, `POS`, `ID`, `REF`, `ALT`, `n_families`, `n_informative`, `z`, and `p_exact`. `n_families` counts sibships with both groups genotyped on that row. `z` is blank when `n_informative` is 0, and `p_exact` is then 1. A chromosome with no qualifying variant is omitted from `--output-dir`.
 
+Column statistics for Otari `variant_effects_comprehensive.tsv`. Pass `--otari`. Each `chrN` directory contains shard directories, and each shard contains that file. A row is one variant and one transcript. The id `21_10414931_C_T_hg38` is grouped as `chr21_10414931_C_T`.
+
+```bash
+pheno-model-stats \
+  --input-dir /path/to/otari \
+  --output-dir /path/to/stats \
+  --otari
+```
+
+A chromosome with at least one data row is written to `chrN/columns.by_row.tsv` and `chrN/columns.by_variant.tsv`. The row file uses every transcript row as one observation. The variant file first takes the plain mean of the stored transcript values, then uses one observation per variant. `n` is the number of finite values in that column. `n_rows` is the number of data rows on the chromosome. `n_variants` is the number of distinct variants. `max_effect` and `mean_effect` are read as stored. Blank cells are omitted from that column. A value that is not a finite number stops the command.
+
+A column whose values are all at least zero is `positive`, including a column of zeros. A column with a value below zero and a value above zero is `both`. Any other column is `negative`. The reported quantile is the smallest value whose rank reaches that fraction of the sorted data. A positive column fills `q50`, `q95`, `q98`, and `q99`. Its 1%, 2%, and 5% trims keep values up to `q99`, `q98`, and `q95`. A negative column fills `q01`, `q02`, `q05`, and `q50`, and those trims keep values from `q01`, `q02`, and `q05` upward. A both column fills `q005`, `q01`, `q025`, `q50`, `q975`, `q99`, and `q995`. Its trims keep `[q005, q995]`, `[q01, q99]`, and `[q025, q975]`. A value on a boundary stays. `mean_1` and `std_1` are the mean and standard deviation after the 1% trim, and the same pattern is used for 2% and 5%. The standard deviation divides by `n - 1`. A quantile that does not apply to the sign is blank.
+
+`chrN/columns.by_row.hist.tsv` and `chrN/columns.by_variant.hist.tsv` hold 50 equal-width bins for each column that has a finite value. A positive column is binned from 0 to `q99`, a negative column from `q01` to 0, and a both column from `q01` to `q99`. An open end is an extra bin bounded by `-inf` or `inf`. When the two edges are equal, that column has one bin instead of 50.
+
 Per-person Otari burden. For each carried variant, transcript scores are made absolute unless `--no-abs` is set, then collapsed across transcripts. A scored variant is damaging when that collapsed score is greater than `--threshold`.
 
 ```bash
