@@ -99,6 +99,16 @@ A column whose values are all at least zero is `positive`, including a column of
 
 `chrN/columns.by_row.hist.tsv` and `chrN/columns.by_variant.hist.tsv` hold 50 equal-width bins for each column that has a finite value. A positive column is binned from 0 to `q99`, a negative column from `q01` to 0, and a both column from `q01` to `q99`. An open end is an extra bin bounded by `-inf` or `inf`. When the two edges are equal, that column has one bin instead of 50.
 
+The same command reads Seqweaver diffs when `--seqweaver` is set instead of `--otari`. It walks each `chrN` directory until it finds `seqweaver_human/annot.*diffs.h5` and the matching `annot.*_row_labels.txt`. The HDF5 `data` matrix has one row per variant and one column per cell line or tissue. `--column-names` is that list, one name per line, in matrix order. `resources/model_weights/seqweaver.colnames` from the Otari resources archive has the 217 names. Each matrix row is one variant, so the row table and the variant table match.
+
+```bash
+pheno-model-stats \
+  --input-dir /path/to/seqweaver/inherited \
+  --output-dir /path/to/stats \
+  --seqweaver \
+  --column-names /path/to/seqweaver.colnames
+```
+
 Per-person Otari burden. For each carried variant, transcript scores are made absolute unless `--no-abs` is set, then collapsed across transcripts. A scored variant is damaging when that collapsed score is greater than `--threshold`.
 
 ```bash

@@ -252,7 +252,7 @@ def test_differing_columns_are_rejected(tmp_path: Path) -> None:
 def test_cli_requires_otari(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["--input-dir", str(tmp_path), "--output-dir", str(tmp_path / "out")])
     assert code == 1
-    assert "error: set --otari" in capsys.readouterr().err
+    assert "error: set exactly one of --otari and --seqweaver" in capsys.readouterr().err
 
 
 def test_cli_writes_statistics(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -263,3 +263,53 @@ def test_cli_writes_statistics(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert code == 0
     assert "Wrote column statistics for 1 chromosomes" in capsys.readouterr().out
     assert (output / "chr21" / "columns.by_variant.hist.tsv").is_file()
+
+
+def _seqweaver(path: Path, matrix: list[list[float]], labels: list[str]) -> None:
+    import h5py
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("data", data=matrix)
+    path.with_name(path.name.replace("_diffs.h5", "_row_labels.txt")).write_text(
+        "".join(f"{label}\n" for label in labels),
+        encoding="utf-8",
+    )
+
+
+def test_seqweaver_concatenates_slices_and_matches_row_and_variant(tmp_path: Path) -> None:
+    source = tmp_path / "seqweaver"
+    root = source / "chr21" / "variants_00000"
+    _seqweaver(
+        root / "variants_00000_slice_024" / "seqweaver_human" / "annot.variants_00000_slice_024_diffs.h5",
+        [[1.0, -2.0], [3.0, float("nan")]],
+        ["v1", "v2"],
+    )
+    _seqweaver(
+        root / "variants_00000_slice_025" / "seqweaver_human" / "annot.variants_00000_slice_025_diffs.h5",
+        [[5.0, 6.0]],
+        ["v3"],
+    )
+    names = tmp_path / "seqweaver.colnames"
+    names.write_text("score_a\nscore_b\n", encoding="utf-8")
+    output = tmp_path / "stats"
+    assert compute_model_stats(source, output, seqweaver=True, column_names=names) == 1
+    by_row = _by_column(output / "chr21" / "columns.by_row.tsv")
+    by_variant = _by_column(output / "chr21" / "columns.by_variant.tsv")
+    assert list(by_row) == ["score_a", "score_b"]
+    assert by_row["score_a"]["n"] == "3"
+    assert by_row["score_a"]["n_rows"] == "3"
+    assert by_row["score_a"]["sign"] == "positive"
+    assert float(by_row["score_a"]["mean"]) == pytest.approx(3)
+    assert by_row["score_b"]["n"] == "2"
+    assert by_row["score_b"]["sign"] == "both"
+    assert float(by_row["score_b"]["mean"]) == pytest.approx(2)
+    assert by_variant["score_a"]["n_variants"] == "3"
+    assert by_variant["score_a"]["mean"] == by_row["score_a"]["mean"]
+    assert by_variant["score_b"]["n"] == "2"
+
+
+def test_seqweaver_requires_column_names(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--input-dir", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--seqweaver"])
+    assert code == 1
+    assert "error: --column-names is required with --seqweaver" in capsys.readouterr().err

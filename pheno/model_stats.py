@@ -43,21 +43,40 @@ _TRIMS = (
 _HIST_FIELDS = ["column", "bin_left", "bin_right", "n"]
 
 
-def compute_model_stats(input_dir: Path, output_dir: Path, *, otari: bool) -> int:
-    """Write per-chromosome column statistics for Otari score tables.
+def compute_model_stats(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    otari: bool = False,
+    seqweaver: bool = False,
+    column_names: Path | None = None,
+) -> int:
+    """Write per-chromosome column statistics for model score tables.
 
-    ``chrN/columns.by_row.tsv`` uses each transcript row as one observation.
-    ``chrN/columns.by_variant.tsv`` first takes the plain mean of the stored
-    values for each variant. Histograms are written beside those tables.
+    ``chrN/columns.by_row.tsv`` uses each input row as one observation.
+    For Otari, ``chrN/columns.by_variant.tsv`` first takes the plain mean of
+    the stored values for each variant. A Seqweaver matrix has one row per
+    variant, so those two tables match. Histograms are written beside them.
     A chromosome with no data rows is omitted.
     """
-    if not otari:
-        raise ValueError("set --otari")
+    if otari == seqweaver:
+        raise ValueError("set exactly one of --otari and --seqweaver")
+    if seqweaver and column_names is None:
+        raise ValueError("--column-names is required with --seqweaver")
+    if column_names is not None and not seqweaver:
+        raise ValueError("--column-names requires --seqweaver")
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
-    chromosomes = _discover(input_dir)
-    if not chromosomes:
-        raise ValueError(f"no {_OTARI_NAME} files under {input_dir}")
+    names: list[str] = []
+    if otari:
+        chromosomes = _discover(input_dir)
+        if not chromosomes:
+            raise ValueError(f"no {_OTARI_NAME} files under {input_dir}")
+    else:
+        names = _load_column_names(column_names)
+        chromosomes = _discover_seqweaver(input_dir)
+        if not chromosomes:
+            raise ValueError(f"no seqweaver annot.*diffs.h5 files under {input_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     written = 0
     try:
@@ -66,7 +85,7 @@ def compute_model_stats(input_dir: Path, output_dir: Path, *, otari: bool) -> in
             shutil.rmtree(partial, ignore_errors=True)
             partial.mkdir(parents=True)
             try:
-                loaded = _spill(files, partial)
+                loaded = _spill(files, partial) if otari else _spill_seqweaver(files, partial, names)
                 if loaded[1] == 0:
                     continue
                 try:
@@ -103,6 +122,39 @@ def _discover(input_dir: Path) -> list[tuple[str, list[Path]]]:
         if files:
             found.append((chrom_dir.name, sorted(files, key=_shard_key)))
     return found
+
+
+def _discover_seqweaver(input_dir: Path) -> list[tuple[str, list[tuple[Path, Path]]]]:
+    found: list[tuple[str, list[tuple[Path, Path]]]] = []
+    for chrom_dir in _chrom_dirs(input_dir):
+        pairs: list[tuple[Path, Path]] = []
+        for path in chrom_dir.rglob("annot.*diffs.h5"):
+            if path.is_file() and path.parent.name == "seqweaver_human":
+                pairs.append((path, _row_labels_path(path)))
+        if pairs:
+            found.append((chrom_dir.name, sorted(pairs, key=lambda item: item[0].as_posix())))
+    return found
+
+
+def _row_labels_path(diffs: Path) -> Path:
+    name = diffs.name
+    if not name.endswith("_diffs.h5"):
+        raise ValueError(f"{diffs} is not an annot.*diffs.h5 file")
+    labels = diffs.with_name(name[: -len("_diffs.h5")] + "_row_labels.txt")
+    if not labels.is_file():
+        raise ValueError(f"{diffs} is missing {labels.name}")
+    return labels
+
+
+def _load_column_names(path: Path | None) -> list[str]:
+    if path is None or not path.is_file():
+        raise ValueError(f"column names file not found: {path}")
+    names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not names:
+        raise ValueError(f"{path} has no column names")
+    if len(names) != len(set(names)):
+        raise ValueError(f"{path} has duplicate column names")
+    return names
 
 
 def _chrom_dirs(input_dir: Path) -> list[Path]:
@@ -208,6 +260,66 @@ def _spill(
     value_paths = [partial / f"{index}.values" for index in range(len(columns))]
     index_paths = [partial / f"{index}.index" for index in range(len(columns))]
     return columns, n_rows, len(variants), value_paths, index_paths
+
+
+def _spill_seqweaver(
+    files: list[tuple[Path, Path]],
+    partial: Path,
+    columns: list[str],
+) -> tuple[list[str], int, int, list[Path], list[Path]]:
+    try:
+        import h5py
+    except ImportError as exc:
+        raise ValueError("h5py is required for --seqweaver") from exc
+    n_rows = 0
+    widths: list[tuple[Path, int]] = []
+    for diffs, labels in files:
+        with h5py.File(diffs, "r") as handle:
+            if "data" not in handle:
+                raise ValueError(f"{diffs} is missing data")
+            data = handle["data"]
+            if data.ndim != 2:
+                raise ValueError(f"{diffs} data is not a matrix")
+            if data.shape[1] != len(columns):
+                raise ValueError(
+                    f"{diffs} has {data.shape[1]} columns and the column names file has {len(columns)}"
+                )
+            width = int(data.shape[0])
+        _check_row_labels(labels, width)
+        widths.append((diffs, width))
+        n_rows += width
+    value_handles = [(partial / f"{index}.values").open("wb") for index in range(len(columns))]
+    index_handles = [(partial / f"{index}.index").open("wb") for index in range(len(columns))]
+    try:
+        row_base = 0
+        for diffs, width in widths:
+            with h5py.File(diffs, "r") as handle:
+                data = handle["data"]
+                for start in range(0, width, _FLUSH):
+                    block = np.asarray(data[start : start + _FLUSH], dtype=np.float64)
+                    for column_index in range(len(columns)):
+                        values = block[:, column_index]
+                        finite = np.isfinite(values)
+                        if not finite.any():
+                            continue
+                        chosen = np.flatnonzero(finite)
+                        values[chosen].astype(np.float64, copy=False).tofile(value_handles[column_index])
+                        (row_base + start + chosen).astype(np.int32).tofile(index_handles[column_index])
+            row_base += width
+    finally:
+        for handle in value_handles:
+            handle.close()
+        for handle in index_handles:
+            handle.close()
+    value_paths = [partial / f"{index}.values" for index in range(len(columns))]
+    index_paths = [partial / f"{index}.index" for index in range(len(columns))]
+    return columns, n_rows, n_rows, value_paths, index_paths
+
+
+def _check_row_labels(path: Path, n_rows: int) -> None:
+    lines = sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    if lines != n_rows and lines != n_rows + 1:
+        raise ValueError(f"{path} has {lines} label rows for {n_rows} variants")
 
 
 def _flush_column(values_handle, index_handle, values: list[float], indices: list[int]) -> None:
