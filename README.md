@@ -82,7 +82,7 @@ pheno-asd-transmission \
   --output transmission.tsv
 ```
 
-`--output` writes every chromosome into that one file. `--output-dir` writes one file per chromosome, `chrN/inherited.tsv`, ordered by position. Set exactly one of the two. The columns are `CHROM`, `POS`, `ID`, `REF`, `ALT`, `n_families`, `n_informative`, `z`, and `p_exact`. `n_families` counts sibships with both groups genotyped on that row. `z` is blank when `n_informative` is 0, and `p_exact` is then 1. A chromosome with no qualifying variant is omitted from `--output-dir`.
+`--output` writes every chromosome into that one file. `--output-dir` writes one file per chromosome, `chrN/inherited.tsv`, ordered by position. Set exactly one of the two. The columns are `CHROM`, `POS`, `ID`, `REF`, `ALT`, `n_families`, `n_informative`, `z`, and `p_exact`. `n_families` counts sibships with both groups genotyped on that row. `z` is blank when `n_informative` is 0, and `p_exact` is then 1. `--fcap 30` keeps that exact p-value when there are at most 30 informative families, and above that sets `p_exact` to the two-sided normal tail of `z`. Omit `--fcap` to keep the exact p-value for every row. The same rule applies to the gene table. A chromosome with no qualifying variant is omitted from `--output-dir`.
 
 Column statistics for Otari `variant_effects_comprehensive.tsv`. Pass `--otari`. Each `chrN` directory contains shard directories, and each shard contains that file. A row is one variant and one transcript. The id `21_10414931_C_T_hg38` is grouped as `chr21_10414931_C_T`.
 

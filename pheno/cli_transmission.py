@@ -70,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Bases past both ends of a gene when --genes is set (default 2000)",
     )
+    parser.add_argument(
+        "--fcap",
+        default=None,
+        type=int,
+        help=(
+            "Exact p-value when the number of informative families is at most this value. "
+            "Above it, use the two-sided normal tail of z"
+        ),
+    )
     return parser
 
 
@@ -92,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             genes=args.genes,
             window=2000 if args.window is None else args.window,
+            fcap=args.fcap,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

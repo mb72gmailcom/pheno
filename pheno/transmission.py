@@ -10,6 +10,8 @@ from fractions import Fraction
 from itertools import combinations
 from pathlib import Path
 
+from scipy.stats import norm
+
 from pheno.gene_burden import _genes_at, _intervals_for, load_gene_index
 
 _CHROM_DIR = re.compile(r"^chr(\d+|X|Y)$")
@@ -63,6 +65,7 @@ def compute_transmission(
     output_dir: Path | None = None,
     genes: Path | None = None,
     window: int = _DEFAULT_WINDOW,
+    fcap: int | None = None,
 ) -> tuple[int, int]:
     """Write one row for each variant seen in an ASD and unaffected sibship.
 
@@ -72,10 +75,14 @@ def compute_transmission(
     dosage 0. Dosage is 0, 1, or 2 for a biallelic genotype. Multiallelic
     variants are skipped. ``z`` is blank when no family is informative, and
     ``p_exact`` is then 1. When ``genes`` is set, each gene sums those dosages
-    and is tested with one label shuffle per family.
+    and is tested with one label shuffle per family. ``fcap`` keeps the exact
+    p-value for that many informative families or fewer, and uses the
+    two-sided normal tail of ``z`` above it.
     """
     if (output is None) == (output_dir is None):
         raise ValueError("set exactly one of --output and --output-dir")
+    if fcap is not None and fcap < 0:
+        raise ValueError("--fcap must be at least 0")
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
     if not prefix:
@@ -130,6 +137,7 @@ def compute_transmission(
                     gene_types or {},
                     people,
                     members,
+                    fcap,
                 )
                 written += variants
                 gene_written += gene_rows
@@ -148,7 +156,7 @@ def compute_transmission(
                 listed = _cohort_dosages(calls, people)
                 if gene_index is not None and listed:
                     gene_records.append((int(pos), listed))
-                result = _contrast(listed, people, members)
+                result = _contrast(listed, people, members, fcap)
                 if result is None:
                     continue
                 n_families, n_informative, z, p_exact = result
@@ -178,6 +186,7 @@ def compute_transmission(
             gene_types or {},
             people,
             members,
+            fcap,
         )
         written += variants
         gene_written += gene_rows
@@ -204,6 +213,7 @@ def _flush_chromosome(
     gene_types: dict[str, str],
     people: dict[str, tuple[str, str]],
     members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None,
 ) -> tuple[int, int]:
     if not chrom:
         return 0, 0
@@ -225,7 +235,7 @@ def _flush_chromosome(
     gene_count = 0
     if gene_index is not None:
         gene_rows = _gene_rows(
-            chrom, gene_records, gene_index, gene_names, gene_types, people, members
+            chrom, gene_records, gene_index, gene_names, gene_types, people, members, fcap
         )
         gene_count = len(gene_rows)
         if output_dir is not None:
@@ -269,6 +279,7 @@ def _contrast(
     listed: dict[str, int],
     people: dict[str, tuple[str, str]],
     members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None = None,
 ) -> tuple[int, int, float | None, float] | None:
     if not listed:
         return None
@@ -284,7 +295,12 @@ def _contrast(
     total = sum((family[0] for family in families), Fraction(0))
     variance = sum((family[1] for family in families), Fraction(0))
     z = None if variance == 0 else float(total) / math.sqrt(float(variance))
-    p_exact = 1.0 if not informative else float(_exact_tail(informative, total))
+    if not informative or z is None:
+        p_exact = 1.0
+    elif fcap is not None and len(informative) > fcap:
+        p_exact = float(2.0 * norm.sf(abs(z)))
+    else:
+        p_exact = float(_exact_tail(informative, total))
     return len(families), len(informative), z, p_exact
 
 
@@ -296,6 +312,7 @@ def _gene_rows(
     gene_types: dict[str, str],
     people: dict[str, tuple[str, str]],
     members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None,
 ) -> list[dict[str, object]]:
     if not records:
         return []
@@ -316,7 +333,7 @@ def _gene_rows(
                 sums[gene_id][person] += dosage
     rows: list[dict[str, object]] = []
     for gene_id in sorted(counts, key=lambda gene: (first_pos[gene], gene)):
-        result = _contrast(sums[gene_id], people, members)
+        result = _contrast(sums[gene_id], people, members, fcap)
         if result is None:
             continue
         n_families, n_informative, z, p_exact = result
