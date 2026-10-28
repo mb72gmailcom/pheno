@@ -204,7 +204,7 @@ def test_gene_sums_three_variants_and_shuffles_once(tmp_path: Path):
     rows = _rows(output_dir / "chr21" / "inherited.genes.tsv")
     assert len(rows) == 1
     gene = rows[0]
-    assert gene["gene"] == "ENSG00000000001"
+    assert gene["gene_id"] == "ENSG00000000001"
     assert gene["gene_name"] == "AAA"
     assert gene["gene_type"] == "protein_coding"
     assert gene["n_variants"] == "3"
@@ -314,7 +314,7 @@ def _pair_family(path: Path) -> None:
     )
 
 
-def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path):
+def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     source = tmp_path / "results"
     _write(
         source / "chr21" / "inherited_1_5000.tsv",
@@ -354,13 +354,18 @@ def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path):
         genes=annotation,
         window=0,
         otari_dir=tmp_path / "otari",
+        debug_gene="ENSG00000000001.5",
+        chrom="21",
     )
     assert not (output_dir / "chr21" / "inherited.genes.tsv").exists()
     rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
     assert len(rows) == 1
     gene = rows[0]
-    assert gene["gene"] == "ENSG00000000001"
+    assert gene["gene_id"] == "ENSG00000000001"
     assert gene["n_variants"] == "3"
+    assert gene["n_informative"] == "1"
+    assert float(gene["z"]) == pytest.approx(1)
+    assert float(gene["p_exact"]) == pytest.approx(1)
     assert gene["n_scored"] == "2"
     assert gene["n_families"] == "1"
     normal_p = 2 * norm.sf(1)
@@ -373,6 +378,85 @@ def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path):
     assert float(gene["Cancel_p"]) == pytest.approx(1)
     variants = {row["POS"]: row for row in _rows(output_dir / "chr21" / "inherited.tsv")}
     assert float(variants["100"]["p_exact"]) == pytest.approx(1)
+    printed = capsys.readouterr().out
+    assert "debug ENSG00000000001: variant chr21 100 G A shard 1_5000; dosages A=1; score found" in printed
+    assert "debug ENSG00000000001: variant chr21 300 A G shard 1_5000; dosages A=1; no score" in printed
+    assert "writing n_variants=3 n_families=1 n_scored=2 n_informative=1 z=" in printed
+
+
+def test_debug_gene_reports_a_missing_gene_and_a_dropped_row(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_20.tsv", "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    family.write_text(
+        "person\tfamily\tmother\tfather\tsex\tasd\nA\tF1\tmom\tdad\tmale\t2\n",
+        encoding="utf-8",
+    )
+    annotation = tmp_path / "genes.tsv"
+    _annotation(annotation)
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        debug_gene="ENSG00000000999",
+        chrom="chr21",
+    )
+    assert "debug ENSG00000000999: chr21: not in the annotation" in capsys.readouterr().out
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        debug_gene="ENSG00000000001",
+        chrom="21",
+    )
+    printed = capsys.readouterr().out
+    assert "dropping; no carrier family has both an ASD child and an unaffected sibling" in printed
+    assert "A asd family F1 asd=1 unaffected=0" in printed
+    assert not (output_dir / "chr21" / "inherited.genes.tsv").exists()
+
+
+def test_debug_gene_requires_a_chromosome(tmp_path: Path):
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_20.tsv", "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chr22" / "inherited_1_20.tsv", "chr22\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    with pytest.raises(ValueError, match="--debug-gene requires --chr"):
+        compute_transmission(
+            source,
+            "inherited",
+            people,
+            output_dir=tmp_path / "by-chrom",
+            debug_gene="ENSG00000000001",
+        )
+    output_dir = tmp_path / "one-chrom"
+    compute_transmission(source, "inherited", people, output_dir=output_dir, chrom="21")
+    assert (output_dir / "chr21" / "inherited.tsv").is_file()
+    assert not (output_dir / "chr22").exists()
+    code = main(
+        [
+            "--family-file",
+            str(family),
+            "--input-dir",
+            str(source),
+            "--file-pattern",
+            "inherited",
+            "--output-dir",
+            str(tmp_path / "cli"),
+            "--debug-gene",
+            "ENSG00000000001",
+        ]
+    )
+    assert code == 1
 
 
 def _score_shard(root: Path, chrom: str, shard: str, rows: str) -> None:

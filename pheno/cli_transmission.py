@@ -104,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Seqweaver column names, one per line, in matrix order. Requires --seqweaver",
     )
+    parser.add_argument(
+        "--chr",
+        default=None,
+        help="Process only this chromosome, such as 1 or X. Required with --debug-gene.",
+    )
+    parser.add_argument(
+        "--debug-gene",
+        default=None,
+        help="Print how this gene id is assigned and whether its row is written. Requires --chr. A version suffix is ignored.",
+    )
     return parser
 
 
@@ -130,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
             otari_dir=args.otari_dir,
             seqweaver_dir=args.seqweaver,
             column_names=args.column_names,
+            debug_gene=args.debug_gene,
+            chrom=args.chr,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

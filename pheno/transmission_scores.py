@@ -21,7 +21,18 @@ _OTARI_TABLE = "variant_effects_comprehensive.tsv"
 _OTARI_GENES = "interpretability_analysis.tsv"
 _SKIPPED_OTARI = {"variant_id", "transcript_id", "max_effect", "mean_effect"}
 _LABEL_COLUMNS = ("chrom", "pos", "ref", "alt")
-_FIXED_FIELDS = ["CHROM", "gene", "gene_name", "gene_type", "n_variants", "n_families", "n_scored"]
+_FIXED_FIELDS = [
+    "CHROM",
+    "gene_id",
+    "gene_name",
+    "gene_type",
+    "n_variants",
+    "n_families",
+    "n_scored",
+    "n_informative",
+    "z",
+    "p_exact",
+]
 _FLUSH = 100_000
 
 
@@ -38,6 +49,120 @@ def gene_scores_path(output: Path) -> Path:
     """Path of the weighted gene table written beside a single variant ``output`` file."""
     suffix = output.suffix or ".tsv"
     return output.with_name(f"{output.stem}.gene_scores{suffix}")
+
+
+class GeneDebug:
+    """Print how one gene id is assigned and whether its row is written."""
+
+    def __init__(self, gene_id: str | None) -> None:
+        self.gene_id = _unversioned_gene_id(gene_id) if gene_id else ""
+        self.on_chromosome = False
+        self.assigned = False
+        self.wrote = False
+
+    def matches(self, gene_id: str) -> bool:
+        return bool(self.gene_id) and gene_id == self.gene_id
+
+    def line(self, message: str) -> None:
+        if self.gene_id:
+            print(f"debug {self.gene_id}: {message}", flush=True)
+
+    def begin_chromosome(
+        self,
+        chrom: str,
+        intervals: list[tuple[int, int, str]],
+        shards: list[tuple[int, int]],
+        gene_names: dict[str, str],
+    ) -> None:
+        self.on_chromosome = False
+        self.assigned = False
+        self.wrote = False
+        if not self.gene_id:
+            return
+        lo: int | None = None
+        hi: int | None = None
+        for start, end, gene_id in intervals:
+            if gene_id != self.gene_id:
+                continue
+            self.on_chromosome = True
+            lo = start if lo is None else min(lo, start)
+            hi = end if hi is None else max(hi, end)
+        if not self.on_chromosome or lo is None or hi is None:
+            self.line(f"{chrom}: not in the annotation")
+            return
+        name = gene_names.get(self.gene_id, "")
+        label = f"{self.gene_id} {name}".rstrip()
+        if not shards:
+            self.line(f"{chrom}: {label} interval {lo}-{hi}")
+            return
+        covered = [(start, end) for start, end in shards if start <= hi and end >= lo]
+        ranges = ", ".join(f"{start}_{end}" for start, end in covered) or "none"
+        self.line(f"{chrom}: {label} interval {lo}-{hi}; shards {ranges}")
+
+    def variant(
+        self,
+        chrom: str,
+        pos: str,
+        ref: str,
+        alt: str,
+        dosages: dict[str, int],
+        *,
+        shard: str = "",
+        scored: bool | None = None,
+    ) -> None:
+        self.assigned = True
+        where = f" shard {shard}" if shard else ""
+        doses = ",".join(f"{person}={dosage}" for person, dosage in sorted(dosages.items()))
+        score = ""
+        if scored is True:
+            score = "; score found"
+        elif scored is False:
+            score = "; no score"
+        self.line(f"variant {chrom} {pos} {ref} {alt}{where}; dosages {doses}{score}")
+
+    def still_open(self, shard: str, reach: int, next_start: int) -> None:
+        self.line(f"stays open after shard {shard}; reach {reach}; next shard starts {next_start}")
+
+    def dropped(self, detail: str) -> None:
+        self.line(f"dropping; {detail}")
+
+    def wrote_row(self, row: dict[str, object]) -> None:
+        self.wrote = True
+        scored = row.get("n_scored", "")
+        scored_text = f" n_scored={scored}" if "n_scored" in row else ""
+        self.line(
+            "writing"
+            f" n_variants={row['n_variants']}"
+            f" n_families={row['n_families']}"
+            f"{scored_text}"
+            f" n_informative={row['n_informative']}"
+            f" z={row['z']}"
+            f" p_exact={row['p_exact']}"
+        )
+
+    def end_chromosome(self, chrom: str) -> None:
+        if not self.gene_id or not self.on_chromosome:
+            return
+        if not self.assigned:
+            self.line(f"{chrom}: no variant assigned")
+
+
+def format_carriers(
+    carriers: set[str] | dict[str, object],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+) -> str:
+    """Why a gene with these carriers has no ASD and unaffected sibship."""
+    parts: list[str] = []
+    people_ids = carriers if isinstance(carriers, set) else carriers.keys()
+    for person in sorted(people_ids):
+        status, family_id = people[person]
+        group = members[family_id]
+        n_asd = sum(1 for _person, is_asd in group if is_asd)
+        n_unaffected = sum(1 for _person, is_asd in group if not is_asd)
+        parts.append(f"{person} {status} family {family_id} asd={n_asd} unaffected={n_unaffected}")
+    detail = "; ".join(parts) if parts else "no carriers"
+    return f"no carrier family has both an ASD child and an unaffected sibling; {detail}"
 
 
 def score_fieldnames(columns: list[str]) -> list[str]:
@@ -87,21 +212,23 @@ def paired_otari_shards(
     input_dir: Path,
     otari_dir: Path,
     prefix: str,
+    only: str | None = None,
 ) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
     """Pair site files with Otari shard directories that use the same start and end.
 
     Each entry is ``(sites file, Otari shard directory, start, end)`` in position order.
     """
-    return _pair_shards(input_dir, prefix, otari_dir, _otari_shard_dirs, "otari")
+    return _pair_shards(input_dir, prefix, otari_dir, _otari_shard_dirs, "otari", only)
 
 
 def paired_seqweaver_shards(
     input_dir: Path,
     seqweaver_dir: Path,
     prefix: str,
+    only: str | None = None,
 ) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
     """Pair site files with Seqweaver directories named ``variants_START_END`` or ``START_END``."""
-    return _pair_shards(input_dir, prefix, seqweaver_dir, _seqweaver_shard_dirs, "seqweaver")
+    return _pair_shards(input_dir, prefix, seqweaver_dir, _seqweaver_shard_dirs, "seqweaver", only)
 
 
 def _pair_shards(
@@ -110,11 +237,15 @@ def _pair_shards(
     model_dir: Path,
     discover,
     label: str,
+    only: str | None = None,
 ) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
     pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)_(\d+)\.tsv$")
     plan: list[tuple[str, list[tuple[Path, Path, int, int]]]] = []
     found_sites = False
-    for chrom_dir in _chrom_dirs(input_dir):
+    chrom_dirs = _chrom_dirs(input_dir)
+    if only is not None:
+        chrom_dirs = [path for path in chrom_dirs if path.name == only]
+    for chrom_dir in chrom_dirs:
         loose = [path for path in chrom_dir.glob(f"{prefix}*.tsv") if path.is_file()]
         if not loose:
             continue
@@ -137,6 +268,8 @@ def _pair_shards(
             )
         plan.append((chrom_dir.name, [(sites[key], model[key], key[0], key[1]) for key in sorted(sites)]))
     if not found_sites:
+        if only is not None:
+            return []
         raise ValueError(f"no {prefix}_START_END.tsv files under {input_dir}")
     return plan
 
@@ -312,6 +445,8 @@ class GeneScores:
         people: dict[str, tuple[str, str]],
         members: dict[str, list[tuple[str, bool]]],
         source: ScoreSource,
+        fcap: int | None = None,
+        debug: GeneDebug | None = None,
     ) -> None:
         self.chrom = chrom
         self.intervals = intervals
@@ -320,6 +455,8 @@ class GeneScores:
         self.people = people
         self.members = members
         self.source = source
+        self.fcap = fcap
+        self.debug = debug or GeneDebug(None)
         self.reach: dict[str, int] = {}
         for _lo, hi, gene_id in intervals:
             current = self.reach.get(gene_id)
@@ -329,12 +466,14 @@ class GeneScores:
         self.scored: dict[str, int] = defaultdict(int)
         self.carriers: dict[str, set[str]] = defaultdict(set)
         self.weights: dict[str, dict[str, np.ndarray]] = {}
+        self.dosages: dict[str, dict[str, int]] = {}
         self.first_pos: dict[str, int] = {}
 
     def add(
         self,
         records: list[tuple[int, str, str, str, dict[str, int]]],
         loaded: dict[tuple[str, str], np.ndarray] | dict[tuple[str, str, str, str], np.ndarray],
+        shard: str = "",
     ) -> None:
         if not records or not self.intervals:
             return
@@ -347,7 +486,20 @@ class GeneScores:
                 if gene_id not in self.first_pos or pos < self.first_pos[gene_id]:
                     self.first_pos[gene_id] = pos
                 self.carriers[gene_id].update(dosages)
+                dose_bucket = self.dosages.setdefault(gene_id, {})
+                for person, dosage in dosages.items():
+                    dose_bucket[person] = dose_bucket.get(person, 0) + dosage
                 values = score_vector(loaded, self.source, self.chrom, pos_text, ref, alt, gene_id)
+                if self.debug.matches(gene_id):
+                    self.debug.variant(
+                        self.chrom,
+                        pos_text,
+                        ref,
+                        alt,
+                        dosages,
+                        shard=shard,
+                        scored=values is not None,
+                    )
                 if values is None:
                     continue
                 self.scored[gene_id] += 1
@@ -370,6 +522,11 @@ class GeneScores:
         rows: list[dict[str, object]] = []
         for gene_id in ready:
             row = self._row(gene_id)
+            if self.debug.matches(gene_id):
+                if row is None:
+                    self.debug.dropped(format_carriers(self.carriers[gene_id], self.people, self.members))
+                else:
+                    self.debug.wrote_row(row)
             if row is not None:
                 rows.append(row)
             self._drop(gene_id)
@@ -388,13 +545,25 @@ class GeneScores:
         n_families, informative, z_values = summary
         row: dict[str, object] = {
             "CHROM": self.chrom,
-            "gene": gene_id,
+            "gene_id": gene_id,
             "gene_name": self.gene_names.get(gene_id, ""),
             "gene_type": self.gene_types.get(gene_id, ""),
             "n_variants": self.counts[gene_id],
             "n_families": n_families,
             "n_scored": self.scored[gene_id],
         }
+        from pheno.transmission import _contrast
+
+        plain = _contrast(self.dosages.get(gene_id, {}), self.people, self.members, self.fcap)
+        if plain is None:
+            row["n_informative"] = 0
+            row["z"] = ""
+            row["p_exact"] = format(1.0, ".12g")
+        else:
+            _families, n_informative, z_value, p_exact = plain
+            row["n_informative"] = n_informative
+            row["z"] = "" if z_value is None else format(z_value, ".12g")
+            row["p_exact"] = format(p_exact, ".12g")
         for index, column in enumerate(self.source.columns):
             count = int(informative[index])
             row[f"{column}_n_informative"] = count
@@ -412,6 +581,7 @@ class GeneScores:
         self.scored.pop(gene_id, None)
         self.carriers.pop(gene_id, None)
         self.weights.pop(gene_id, None)
+        self.dosages.pop(gene_id, None)
         self.first_pos.pop(gene_id, None)
 
 
@@ -425,14 +595,31 @@ def gene_score_rows(
     members: dict[str, list[tuple[str, bool]]],
     source: ScoreSource,
     loaded: dict[tuple[str, str], np.ndarray] | dict[tuple[str, str, str, str], np.ndarray],
+    fcap: int | None = None,
+    debug: GeneDebug | None = None,
 ) -> list[dict[str, object]]:
     """One wide row per gene. ``p`` is the two-sided normal tail of ``z``."""
+    debug = debug or GeneDebug(None)
     intervals = _intervals_for(chrom, gene_index)
+    debug.begin_chromosome(chrom, intervals, [], gene_names)
     if not records or not intervals:
+        debug.end_chromosome(chrom)
         return []
-    running = GeneScores(chrom, intervals, gene_names, gene_types, people, members, source)
+    running = GeneScores(
+        chrom,
+        intervals,
+        gene_names,
+        gene_types,
+        people,
+        members,
+        source,
+        fcap,
+        debug,
+    )
     running.add(records, loaded)
-    return running.emit(None)
+    rows = running.emit(None)
+    debug.end_chromosome(chrom)
+    return rows
 
 
 def _summarize(

@@ -15,9 +15,11 @@ from scipy.stats import norm
 from pheno.burden import _variant_id
 from pheno.gene_burden import _chrom_aliases, _genes_at, _intervals_for, load_gene_index
 from pheno.transmission_scores import (
+    GeneDebug,
     GeneScores,
     ScoreSource,
     _load_seqweaver,
+    format_carriers,
     gene_score_rows,
     gene_scores_path,
     load_chromosome_scores,
@@ -53,7 +55,7 @@ _FIELDS = [
 ]
 _GENE_FIELDS = [
     "CHROM",
-    "gene",
+    "gene_id",
     "gene_name",
     "gene_type",
     "n_variants",
@@ -84,6 +86,8 @@ def compute_transmission(
     otari_dir: Path | None = None,
     seqweaver_dir: Path | None = None,
     column_names: Path | None = None,
+    debug_gene: str | None = None,
+    chrom: str | None = None,
 ) -> tuple[int, int]:
     """Write one row for each variant seen in an ASD and unaffected sibship.
 
@@ -96,13 +100,21 @@ def compute_transmission(
     and is tested with one label shuffle per family. ``fcap`` keeps the exact
     p-value for that many informative families or fewer, and uses the
     two-sided normal tail of ``z`` above it. ``otari_dir`` or ``seqweaver_dir``
-    replaces that gene table with a wide score-weighted table. Its ``p`` is
-    always the normal tail.
+    replaces that gene table with a wide score-weighted table. Its per-score
+    ``p`` is always the normal tail. That table also repeats ``n_informative``,
+    ``z``, and ``p_exact`` with every variant weight set to 1, and those follow
+    ``fcap``. ``debug_gene`` prints how that gene id is assigned and requires
+    ``chrom``, so only that chromosome is read. A version suffix is ignored.
+    ``chrom`` alone, such as ``1`` or ``chrX``, also limits the run to one
+    chromosome.
     """
     if (output is None) == (output_dir is None):
         raise ValueError("set exactly one of --output and --output-dir")
     if fcap is not None and fcap < 0:
         raise ValueError("--fcap must be at least 0")
+    if debug_gene and not chrom:
+        raise ValueError("--debug-gene requires --chr")
+    selected = _normalize_chrom(chrom) if chrom else None
     score_source = prepare_score_source(
         otari_dir,
         seqweaver_dir,
@@ -114,16 +126,27 @@ def compute_transmission(
     if not prefix:
         raise ValueError("file pattern must not be empty")
     score_plan = None
+    files: list[Path] = []
     if score_source is not None and score_source.kind == "otari":
-        score_plan = paired_otari_shards(input_dir, score_source.root, prefix)
+        score_plan = paired_otari_shards(input_dir, score_source.root, prefix, selected)
     elif score_source is not None and score_source.kind == "seqweaver":
-        score_plan = paired_seqweaver_shards(input_dir, score_source.root, prefix)
+        score_plan = paired_seqweaver_shards(input_dir, score_source.root, prefix, selected)
+    else:
+        files = _discover(input_dir, prefix, selected)
+    if selected is not None:
+        if score_plan is not None:
+            score_plan = [item for item in score_plan if item[0] == selected]
+            if not score_plan:
+                raise ValueError(f"no {prefix}_START_END.tsv files for {selected} under {input_dir}")
+        else:
+            files = [path for path in files if path.parent.name == selected]
+            if not files:
+                raise ValueError(f"no {prefix} files for {selected} under {input_dir}")
     if score_plan is not None:
         for _chrom, shards in score_plan:
             for sites_path, _shard, _start, _end in shards:
                 _require_trio_header(sites_path)
     else:
-        files = _discover(input_dir, prefix)
         for path in files:
             _require_trio_header(path)
     gene_index = gene_names = gene_types = None
@@ -163,6 +186,7 @@ def compute_transmission(
     written = 0
     gene_written = 0
     members = _members_by_family(people)
+    debug = GeneDebug(debug_gene)
     try:
         if score_plan is not None:
             assert score_source is not None
@@ -180,6 +204,7 @@ def compute_transmission(
                 fcap,
                 score_source,
                 score_writer,
+                debug,
             )
         else:
             written, gene_written = _process_files(
@@ -196,6 +221,7 @@ def compute_transmission(
                 fcap,
                 score_source,
                 score_writer,
+                debug,
             )
     finally:
         if handle is not None:
@@ -221,6 +247,7 @@ def _process_files(
     fcap: int | None,
     score_source: ScoreSource | None,
     score_writer: csv.DictWriter | None,
+    debug: GeneDebug | None = None,
 ) -> tuple[int, int]:
     written = 0
     gene_written = 0
@@ -247,6 +274,7 @@ def _process_files(
                 fcap,
                 score_source,
                 score_writer,
+                debug,
             )
             written += variants
             gene_written += gene_rows
@@ -271,6 +299,7 @@ def _process_files(
         fcap,
         score_source,
         score_writer,
+        debug,
     )
     written += variants
     gene_written += gene_rows
@@ -292,29 +321,42 @@ def _process_score_shards(
     fcap: int | None,
     score_source: ScoreSource,
     score_writer: csv.DictWriter | None,
+    debug: GeneDebug | None = None,
 ) -> tuple[int, int]:
     written = 0
     gene_written = 0
     fields = score_fieldnames(score_source.columns)
     open_scores: dict[str, tuple[object, csv.DictWriter]] = {}
+    debug = debug or GeneDebug(None)
     try:
         for chrom, shards in plan:
             pending: list[dict[str, object]] = []
             seen: set[tuple[str, str, str, str]] = set()
             records: list[tuple[int, str, str, str, dict[str, int]]] = []
             intervals = _intervals_for(chrom, gene_index)
-            report_long_genes(
+            shard_bounds = [(start, end) for _sites, _shard, start, end in shards]
+            report_long_genes(chrom, intervals, shard_bounds, gene_names)
+            debug.begin_chromosome(chrom, intervals, shard_bounds, gene_names)
+            running = GeneScores(
                 chrom,
                 intervals,
-                [(start, end) for _sites, _shard, start, end in shards],
                 gene_names,
+                gene_types,
+                people,
+                members,
+                score_source,
+                fcap,
+                debug,
             )
-            running = GeneScores(chrom, intervals, gene_names, gene_types, people, members, score_source)
-            for index, (sites_path, shard, _start, _end) in enumerate(shards):
+            for index, (sites_path, shard, start, end) in enumerate(shards):
                 records.clear()
                 _read_site_file(sites_path, seen, pending, records, people, members, fcap, True)
                 if records:
-                    running.add(records, _load_shard_scores(score_source, chrom, shard, records))
+                    running.add(
+                        records,
+                        _load_shard_scores(score_source, chrom, shard, records),
+                        f"{start}_{end}",
+                    )
                 next_start = shards[index + 1][2] if index + 1 < len(shards) else None
                 gene_written += _append_score_rows(
                     chrom,
@@ -325,6 +367,9 @@ def _process_score_shards(
                     score_writer,
                     open_scores,
                 )
+                if debug.gene_id and debug.gene_id in running.counts and next_start is not None:
+                    debug.still_open(f"{start}_{end}", running.reach.get(debug.gene_id, -1), next_start)
+            debug.end_chromosome(chrom)
             variants, _gene_rows = _flush_chromosome(
                 chrom,
                 pending,
@@ -447,6 +492,7 @@ def _flush_chromosome(
     fcap: int | None,
     score_source: ScoreSource | None = None,
     score_writer: csv.DictWriter | None = None,
+    debug: GeneDebug | None = None,
 ) -> tuple[int, int]:
     if not chrom:
         return 0, 0
@@ -478,6 +524,8 @@ def _flush_chromosome(
             members,
             score_source,
             loaded,
+            fcap,
+            debug,
         )
         gene_count = len(gene_rows)
         fields = score_fieldnames(score_source.columns)
@@ -495,7 +543,15 @@ def _flush_chromosome(
             score_writer.writerows(gene_rows)
     elif gene_index is not None:
         gene_rows = _gene_rows(
-            chrom, gene_records, gene_index, gene_names, gene_types, people, members, fcap
+            chrom,
+            gene_records,
+            gene_index,
+            gene_names,
+            gene_types,
+            people,
+            members,
+            fcap,
+            debug,
         )
         gene_count = len(gene_rows)
         if output_dir is not None:
@@ -573,43 +629,51 @@ def _gene_rows(
     people: dict[str, tuple[str, str]],
     members: dict[str, list[tuple[str, bool]]],
     fcap: int | None,
+    debug: GeneDebug | None = None,
 ) -> list[dict[str, object]]:
-    if not records:
+    debug = debug or GeneDebug(None)
+    intervals = _intervals_for(chrom, gene_index)
+    debug.begin_chromosome(chrom, intervals, [], gene_names)
+    if not records or not intervals:
+        debug.end_chromosome(chrom)
         return []
     records.sort(key=lambda item: item[0])
-    intervals = _intervals_for(chrom, gene_index)
-    if not intervals:
-        return []
     assigned = _genes_at([pos for pos, _text, _ref, _alt, _dosages in records], intervals)
     sums: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     counts: dict[str, int] = defaultdict(int)
     first_pos: dict[str, int] = {}
-    for (pos, _text, _ref, _alt, dosages), gene_ids in zip(records, assigned):
+    for (pos, pos_text, ref, alt, dosages), gene_ids in zip(records, assigned):
         for gene_id in gene_ids:
             counts[gene_id] += 1
             if gene_id not in first_pos or pos < first_pos[gene_id]:
                 first_pos[gene_id] = pos
             for person, dosage in dosages.items():
                 sums[gene_id][person] += dosage
+            if debug.matches(gene_id):
+                debug.variant(chrom, pos_text, ref, alt, dosages)
     rows: list[dict[str, object]] = []
     for gene_id in sorted(counts, key=lambda gene: (first_pos[gene], gene)):
         result = _contrast(sums[gene_id], people, members, fcap)
         if result is None:
+            if debug.matches(gene_id):
+                debug.dropped(format_carriers(sums[gene_id], people, members))
             continue
         n_families, n_informative, z, p_exact = result
-        rows.append(
-            {
-                "CHROM": chrom,
-                "gene": gene_id,
-                "gene_name": gene_names.get(gene_id, ""),
-                "gene_type": gene_types.get(gene_id, ""),
-                "n_variants": counts[gene_id],
-                "n_families": n_families,
-                "n_informative": n_informative,
-                "z": "" if z is None else format(z, ".12g"),
-                "p_exact": format(p_exact, ".12g"),
-            }
-        )
+        row = {
+            "CHROM": chrom,
+            "gene_id": gene_id,
+            "gene_name": gene_names.get(gene_id, ""),
+            "gene_type": gene_types.get(gene_id, ""),
+            "n_variants": counts[gene_id],
+            "n_families": n_families,
+            "n_informative": n_informative,
+            "z": "" if z is None else format(z, ".12g"),
+            "p_exact": format(p_exact, ".12g"),
+        }
+        if debug.matches(gene_id):
+            debug.wrote_row(row)
+        rows.append(row)
+    debug.end_chromosome(chrom)
     return rows
 
 
@@ -690,9 +754,22 @@ def _reduce(weights: dict[Fraction, int]) -> dict[Fraction, int]:
     return {value: weight // divisor for value, weight in weights.items()}
 
 
-def _discover(input_dir: Path, prefix: str) -> list[Path]:
+def _normalize_chrom(chrom: str) -> str:
+    text = chrom.strip()
+    suffix = text[3:] if text.lower().startswith("chr") else text
+    if suffix.upper() in {"X", "Y"}:
+        suffix = suffix.upper()
+    name = f"chr{suffix}"
+    if not _CHROM_DIR.fullmatch(name):
+        raise ValueError(f"--chr must be a chromosome number, X, or Y, not {chrom}")
+    return name
+
+
+def _discover(input_dir: Path, prefix: str, only: str | None = None) -> list[Path]:
     found: list[Path] = []
     for chrom_dir in _chrom_dirs(input_dir):
+        if only is not None and chrom_dir.name != only:
+            continue
         matches = [path for path in chrom_dir.glob(f"{prefix}*.tsv") if path.is_file()]
         found.extend(sorted(matches, key=lambda path: path.name))
     return found
