@@ -9,6 +9,7 @@ from pathlib import Path
 from pheno.gene_burden import load_analysis_groups
 from pheno.mapping import load_column_map
 from pheno.transmission import compute_transmission, gene_table_path
+from pheno.transmission_scores import gene_scores_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +80,30 @@ def build_parser() -> argparse.ArgumentParser:
             "Above it, use the two-sided normal tail of z"
         ),
     )
+    parser.add_argument(
+        "--otari-dir",
+        default=None,
+        type=Path,
+        help=(
+            "Parent of chrN/{start}_{end}/variant_effects_comprehensive.tsv. "
+            "Weight each gene by the signed tissue scores. Mutually exclusive with --seqweaver"
+        ),
+    )
+    parser.add_argument(
+        "--seqweaver",
+        default=None,
+        type=Path,
+        help=(
+            "Parent of chrN directories of seqweaver_human diffs. "
+            "Weight each gene by those columns. Mutually exclusive with --otari-dir"
+        ),
+    )
+    parser.add_argument(
+        "--column-names",
+        default=None,
+        type=Path,
+        help="Seqweaver column names, one per line, in matrix order. Requires --seqweaver",
+    )
     return parser
 
 
@@ -102,12 +127,18 @@ def main(argv: list[str] | None = None) -> int:
             genes=args.genes,
             window=2000 if args.window is None else args.window,
             fcap=args.fcap,
+            otari_dir=args.otari_dir,
+            seqweaver_dir=args.seqweaver,
+            column_names=args.column_names,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     destination = args.output if args.output is not None else args.output_dir
-    if args.genes is None:
+    if args.otari_dir is not None or args.seqweaver is not None:
+        score_destination = gene_scores_path(args.output) if args.output is not None else args.output_dir
+        print(f"Wrote {written} variants to {destination} and {gene_written} gene scores to {score_destination}")
+    elif args.genes is None:
         print(f"Wrote {written} variants to {destination}")
     else:
         gene_destination = gene_table_path(args.output) if args.output is not None else args.output_dir

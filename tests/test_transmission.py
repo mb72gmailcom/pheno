@@ -295,6 +295,217 @@ def test_negative_fcap_is_rejected(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "error: --fcap must be at least 0" in capsys.readouterr().err
 
 
+def _annotation(path: Path) -> None:
+    path.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t1\t5000\t+\tGENE1\tgene_id "ENSG00000000001.2"; '
+        'gene_type "protein_coding"; gene_name "AAA";\n',
+        encoding="utf-8",
+    )
+
+
+def _pair_family(path: Path) -> None:
+    path.write_text(
+        "person\tfamily\tmother\tfather\tsex\tasd\n"
+        "A\tF1\tmom\tdad\tmale\t2\n"
+        "B\tF1\tmom\tdad\tfemale\t1\n",
+        encoding="utf-8",
+    )
+
+
+def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path):
+    source = tmp_path / "results"
+    _write(
+        source / "chr21" / "inherited_1_5000.tsv",
+        "chr21\t100\t.\tG\tA\tA=0/0|0/1|0/1|99\n"
+        "chr21\t200\t.\tC\tT\tB=0/0|0/1|0/1|99\n"
+        "chr21\t300\t.\tA\tG\tA=0/0|0/1|0/1|99\n",
+    )
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    _annotation(annotation)
+    shard = tmp_path / "otari" / "chr21" / "1_5000"
+    shard.mkdir(parents=True)
+    (shard / "variant_effects_comprehensive.tsv").write_text(
+        "variant_id\ttranscript_id\tBrain\tLiver\tHeart\tCancel\n"
+        "21_100_G_A_hg38\tt1\t-0.75\t0.10\t-1.5\t2\n"
+        "21_100_G_A_hg38\tt2\t0.25\t0.30\t1.5\t0\n"
+        "21_100_G_A_hg38\tt3\t9\t9\t9\t9\n"
+        "21_200_C_T_hg38\tt1\t0\t0\t0\t2\n",
+        encoding="utf-8",
+    )
+    (shard / "interpretability_analysis.tsv").write_text(
+        "variant_id\tgene_id\ttranscript_id\n"
+        "21_100_G_A_hg38\tENSG00000000001.5\tt1\n"
+        "21_100_G_A_hg38\tENSG00000000001.5\tt2\n"
+        "21_100_G_A_hg38\tENSG00000000002.1\tt3\n"
+        "21_200_C_T_hg38\tENSG00000000001.5\tt1\n",
+        encoding="utf-8",
+    )
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        otari_dir=tmp_path / "otari",
+    )
+    assert not (output_dir / "chr21" / "inherited.genes.tsv").exists()
+    rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
+    assert len(rows) == 1
+    gene = rows[0]
+    assert gene["gene"] == "ENSG00000000001"
+    assert gene["n_variants"] == "3"
+    assert gene["n_scored"] == "2"
+    assert gene["n_families"] == "1"
+    normal_p = 2 * norm.sf(1)
+    for column, expected in (("Brain", -1), ("Liver", 1), ("Heart", 1)):
+        assert gene[f"{column}_n_informative"] == "1"
+        assert float(gene[f"{column}_z"]) == pytest.approx(expected)
+        assert float(gene[f"{column}_p"]) == pytest.approx(normal_p)
+    assert gene["Cancel_n_informative"] == "0"
+    assert gene["Cancel_z"] == ""
+    assert float(gene["Cancel_p"]) == pytest.approx(1)
+    variants = {row["POS"]: row for row in _rows(output_dir / "chr21" / "inherited.tsv")}
+    assert float(variants["100"]["p_exact"]) == pytest.approx(1)
+
+
+def test_seqweaver_uses_label_coordinates_and_the_first_duplicate(tmp_path: Path):
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_20.tsv", "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    _annotation(annotation)
+    root = tmp_path / "seqweaver" / "chr21"
+
+    def write_h5(directory: str, name: str, matrix: object, labels: str) -> None:
+        import h5py
+
+        path = root / directory / "seqweaver_human" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("data", data=matrix)
+        path.with_name(name.replace("_diffs.h5", "_row_labels.txt")).write_text(labels, encoding="utf-8")
+
+    label = (
+        "chrom pos name ref alt strand ref_match contains_unk\n"
+        "chr21 10 . G A + True False\n"
+    )
+    write_h5("variants_00000", "annot.variants_00000_diffs.h5", [[1.0]], label)
+    write_h5("variants_00001", "annot.variants_00001_diffs.h5", [[-1.0]], label)
+    import numpy as np
+
+    write_h5(
+        "variants_00002",
+        "annot.variants_00002_diffs.h5",
+        np.zeros((0, 1)),
+        "chrom\tpos\tname\tref\talt\tstrand\tref_match\tcontains_unk\n",
+    )
+    names = tmp_path / "seqweaver.colnames"
+    names.write_text("ago_adult_brain.BA4.hg19\n", encoding="utf-8")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output = tmp_path / "transmission.tsv"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output,
+        genes=annotation,
+        window=0,
+        seqweaver_dir=tmp_path / "seqweaver",
+        column_names=names,
+    )
+    assert not gene_table_path_exists(output)
+    rows = _rows(output.with_name("transmission.gene_scores.tsv"))
+    gene = rows[0]
+    column = "ago_adult_brain.BA4.hg19"
+    assert gene["n_variants"] == "1"
+    assert gene["n_scored"] == "1"
+    assert gene[f"{column}_n_informative"] == "1"
+    assert float(gene[f"{column}_z"]) == pytest.approx(1)
+    assert float(gene[f"{column}_p"]) == pytest.approx(2 * norm.sf(1))
+
+
+def gene_table_path_exists(output: Path) -> bool:
+    suffix = output.suffix or ".tsv"
+    return output.with_name(f"{output.stem}.genes{suffix}").exists()
+
+
+def test_seqweaver_header_only_file_must_match_the_matrix(tmp_path: Path):
+    import h5py
+
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_20.tsv", "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    _annotation(annotation)
+    diffs = (
+        tmp_path
+        / "seqweaver"
+        / "chr21"
+        / "variants_00000"
+        / "seqweaver_human"
+        / "annot.variants_00000_diffs.h5"
+    )
+    diffs.parent.mkdir(parents=True)
+    with h5py.File(diffs, "w") as handle:
+        handle.create_dataset("data", data=[[1.0]])
+    diffs.with_name("annot.variants_00000_row_labels.txt").write_text(
+        "chrom\tpos\tname\tref\talt\tstrand\tref_match\tcontains_unk\n",
+        encoding="utf-8",
+    )
+    names = tmp_path / "seqweaver.colnames"
+    names.write_text("track\n", encoding="utf-8")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    with pytest.raises(ValueError, match="0 label rows for 1 variants"):
+        compute_transmission(
+            source,
+            "inherited",
+            people,
+            tmp_path / "transmission.tsv",
+            genes=annotation,
+            window=0,
+            seqweaver_dir=tmp_path / "seqweaver",
+            column_names=names,
+        )
+
+
+def test_model_score_flags_are_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    family = tmp_path / "family.tsv"
+    family.write_text(FAMILY, encoding="utf-8")
+    shared = [
+        "--family-file",
+        str(family),
+        "--input-dir",
+        str(tmp_path),
+        "--file-pattern",
+        "inherited",
+        "--output",
+        str(tmp_path / "out.tsv"),
+    ]
+    code = main([*shared, "--otari-dir", str(tmp_path), "--seqweaver", str(tmp_path)])
+    assert code == 1
+    assert "set only one of --otari-dir and --seqweaver" in capsys.readouterr().err
+
+    code = main([*shared, "--seqweaver", str(tmp_path)])
+    assert code == 1
+    assert "--column-names is required with --seqweaver" in capsys.readouterr().err
+
+    code = main([*shared, "--column-names", str(tmp_path / "names")])
+    assert code == 1
+    assert "--column-names requires --seqweaver" in capsys.readouterr().err
+
+    code = main([*shared, "--otari-dir", str(tmp_path / "otari")])
+    assert code == 1
+    assert "--genes is required with --otari-dir or --seqweaver" in capsys.readouterr().err
+
+
 def test_output_and_output_dir_are_exclusive(tmp_path: Path, capsys):
     family = tmp_path / "family.tsv"
     family.write_text(FAMILY, encoding="utf-8")

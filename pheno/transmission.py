@@ -13,6 +13,14 @@ from pathlib import Path
 from scipy.stats import norm
 
 from pheno.gene_burden import _genes_at, _intervals_for, load_gene_index
+from pheno.transmission_scores import (
+    ScoreSource,
+    gene_score_rows,
+    gene_scores_path,
+    load_chromosome_scores,
+    prepare_score_source,
+    score_fieldnames,
+)
 
 _CHROM_DIR = re.compile(r"^chr(\d+|X|Y)$")
 _DOSAGE = {
@@ -66,6 +74,9 @@ def compute_transmission(
     genes: Path | None = None,
     window: int = _DEFAULT_WINDOW,
     fcap: int | None = None,
+    otari_dir: Path | None = None,
+    seqweaver_dir: Path | None = None,
+    column_names: Path | None = None,
 ) -> tuple[int, int]:
     """Write one row for each variant seen in an ASD and unaffected sibship.
 
@@ -77,12 +88,20 @@ def compute_transmission(
     ``p_exact`` is then 1. When ``genes`` is set, each gene sums those dosages
     and is tested with one label shuffle per family. ``fcap`` keeps the exact
     p-value for that many informative families or fewer, and uses the
-    two-sided normal tail of ``z`` above it.
+    two-sided normal tail of ``z`` above it. ``otari_dir`` or ``seqweaver_dir``
+    replaces that gene table with a wide score-weighted table. Its ``p`` is
+    always the normal tail.
     """
     if (output is None) == (output_dir is None):
         raise ValueError("set exactly one of --output and --output-dir")
     if fcap is not None and fcap < 0:
         raise ValueError("--fcap must be at least 0")
+    score_source = prepare_score_source(
+        otari_dir,
+        seqweaver_dir,
+        column_names,
+        genes=genes,
+    )
     if not input_dir.is_dir():
         raise ValueError(f"input directory not found: {input_dir}")
     if not prefix:
@@ -96,19 +115,30 @@ def compute_transmission(
 
     handle = None
     gene_handle = None
+    score_handle = None
     writer: csv.DictWriter | None = None
     gene_writer: csv.DictWriter | None = None
+    score_writer: csv.DictWriter | None = None
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         handle = output.open("w", encoding="utf-8", newline="")
         writer = csv.DictWriter(handle, fieldnames=_FIELDS, delimiter="\t", lineterminator="\n")
         writer.writeheader()
-        if gene_index is not None:
+        if gene_index is not None and score_source is None:
             gene_handle = gene_table_path(output).open("w", encoding="utf-8", newline="")
             gene_writer = csv.DictWriter(
                 gene_handle, fieldnames=_GENE_FIELDS, delimiter="\t", lineterminator="\n"
             )
             gene_writer.writeheader()
+        if score_source is not None:
+            score_handle = gene_scores_path(output).open("w", encoding="utf-8", newline="")
+            score_writer = csv.DictWriter(
+                score_handle,
+                fieldnames=score_fieldnames(score_source.columns),
+                delimiter="\t",
+                lineterminator="\n",
+            )
+            score_writer.writeheader()
     else:
         assert output_dir is not None
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,7 +147,7 @@ def compute_transmission(
     gene_written = 0
     seen: set[tuple[str, str, str, str]] = set()
     pending: list[dict[str, object]] = []
-    gene_records: list[tuple[int, dict[str, int]]] = []
+    gene_records: list[tuple[int, str, str, str, dict[str, int]]] = []
     current_chrom = ""
     members = _members_by_family(people)
     try:
@@ -138,6 +168,8 @@ def compute_transmission(
                     people,
                     members,
                     fcap,
+                    score_source,
+                    score_writer,
                 )
                 written += variants
                 gene_written += gene_rows
@@ -155,7 +187,7 @@ def compute_transmission(
                 seen.add(key)
                 listed = _cohort_dosages(calls, people)
                 if gene_index is not None and listed:
-                    gene_records.append((int(pos), listed))
+                    gene_records.append((int(pos), pos, ref, alt, listed))
                 result = _contrast(listed, people, members, fcap)
                 if result is None:
                     continue
@@ -187,6 +219,8 @@ def compute_transmission(
             people,
             members,
             fcap,
+            score_source,
+            score_writer,
         )
         written += variants
         gene_written += gene_rows
@@ -197,13 +231,15 @@ def compute_transmission(
             handle.close()
         if gene_handle is not None:
             gene_handle.close()
+        if score_handle is not None:
+            score_handle.close()
     return written, gene_written
 
 
 def _flush_chromosome(
     chrom: str,
     pending: list[dict[str, object]],
-    gene_records: list[tuple[int, dict[str, int]]],
+    gene_records: list[tuple[int, str, str, str, dict[str, int]]],
     prefix: str,
     writer: csv.DictWriter | None,
     gene_writer: csv.DictWriter | None,
@@ -214,6 +250,8 @@ def _flush_chromosome(
     people: dict[str, tuple[str, str]],
     members: dict[str, list[tuple[str, bool]]],
     fcap: int | None,
+    score_source: ScoreSource | None = None,
+    score_writer: csv.DictWriter | None = None,
 ) -> tuple[int, int]:
     if not chrom:
         return 0, 0
@@ -233,7 +271,34 @@ def _flush_chromosome(
         writer.writerows(pending)
     pending.clear()
     gene_count = 0
-    if gene_index is not None:
+    if gene_index is not None and score_source is not None:
+        loaded = load_chromosome_scores(score_source, chrom, gene_records)
+        gene_rows = gene_score_rows(
+            chrom,
+            gene_records,
+            gene_index,
+            gene_names,
+            gene_types,
+            people,
+            members,
+            score_source,
+            loaded,
+        )
+        gene_count = len(gene_rows)
+        fields = score_fieldnames(score_source.columns)
+        if output_dir is not None:
+            if gene_rows:
+                path = output_dir / chrom / f"{prefix}.gene_scores.tsv"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("w", encoding="utf-8", newline="") as handle:
+                    chrom_writer = csv.DictWriter(
+                        handle, fieldnames=fields, delimiter="\t", lineterminator="\n"
+                    )
+                    chrom_writer.writeheader()
+                    chrom_writer.writerows(gene_rows)
+        elif score_writer is not None:
+            score_writer.writerows(gene_rows)
+    elif gene_index is not None:
         gene_rows = _gene_rows(
             chrom, gene_records, gene_index, gene_names, gene_types, people, members, fcap
         )
@@ -306,7 +371,7 @@ def _contrast(
 
 def _gene_rows(
     chrom: str,
-    records: list[tuple[int, dict[str, int]]],
+    records: list[tuple[int, str, str, str, dict[str, int]]],
     gene_index: dict[str, list[tuple[int, int, str]]],
     gene_names: dict[str, str],
     gene_types: dict[str, str],
@@ -320,11 +385,11 @@ def _gene_rows(
     intervals = _intervals_for(chrom, gene_index)
     if not intervals:
         return []
-    assigned = _genes_at([pos for pos, _dosages in records], intervals)
+    assigned = _genes_at([pos for pos, _text, _ref, _alt, _dosages in records], intervals)
     sums: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     counts: dict[str, int] = defaultdict(int)
     first_pos: dict[str, int] = {}
-    for (pos, dosages), gene_ids in zip(records, assigned):
+    for (pos, _text, _ref, _alt, dosages), gene_ids in zip(records, assigned):
         for gene_id in gene_ids:
             counts[gene_id] += 1
             if gene_id not in first_pos or pos < first_pos[gene_id]:
