@@ -12,13 +12,20 @@ from pathlib import Path
 
 from scipy.stats import norm
 
-from pheno.gene_burden import _genes_at, _intervals_for, load_gene_index
+from pheno.burden import _variant_id
+from pheno.gene_burden import _chrom_aliases, _genes_at, _intervals_for, load_gene_index
 from pheno.transmission_scores import (
+    GeneScores,
     ScoreSource,
+    _load_seqweaver,
     gene_score_rows,
     gene_scores_path,
     load_chromosome_scores,
+    load_otari_shard,
+    paired_otari_shards,
+    paired_seqweaver_shards,
     prepare_score_source,
+    report_long_genes,
     score_fieldnames,
 )
 
@@ -106,9 +113,19 @@ def compute_transmission(
         raise ValueError(f"input directory not found: {input_dir}")
     if not prefix:
         raise ValueError("file pattern must not be empty")
-    files = _discover(input_dir, prefix)
-    for path in files:
-        _require_trio_header(path)
+    score_plan = None
+    if score_source is not None and score_source.kind == "otari":
+        score_plan = paired_otari_shards(input_dir, score_source.root, prefix)
+    elif score_source is not None and score_source.kind == "seqweaver":
+        score_plan = paired_seqweaver_shards(input_dir, score_source.root, prefix)
+    if score_plan is not None:
+        for _chrom, shards in score_plan:
+            for sites_path, _shard, _start, _end in shards:
+                _require_trio_header(sites_path)
+    else:
+        files = _discover(input_dir, prefix)
+        for path in files:
+            _require_trio_header(path)
     gene_index = gene_names = gene_types = None
     if genes is not None:
         gene_index, gene_names, gene_types = load_gene_index(genes, window)
@@ -145,87 +162,41 @@ def compute_transmission(
 
     written = 0
     gene_written = 0
-    seen: set[tuple[str, str, str, str]] = set()
-    pending: list[dict[str, object]] = []
-    gene_records: list[tuple[int, str, str, str, dict[str, int]]] = []
-    current_chrom = ""
     members = _members_by_family(people)
     try:
-        for path in files:
-            chrom_name = path.parent.name
-            if chrom_name != current_chrom:
-                variants, gene_rows = _flush_chromosome(
-                    current_chrom,
-                    pending,
-                    gene_records,
-                    prefix,
-                    writer,
-                    gene_writer,
-                    output_dir,
-                    gene_index,
-                    gene_names or {},
-                    gene_types or {},
-                    people,
-                    members,
-                    fcap,
-                    score_source,
-                    score_writer,
-                )
-                written += variants
-                gene_written += gene_rows
-                if current_chrom:
-                    print(f"finished processing {current_chrom}", flush=True)
-                current_chrom = chrom_name
-                seen.clear()
-            for row in _iter_rows(path):
-                if row is None:
-                    continue
-                chrom, pos, variant_id, ref, alt, calls = row
-                key = (chrom, pos, ref, alt)
-                if key in seen:
-                    raise ValueError(f"duplicate variant {chrom} {pos} {ref} {alt}")
-                seen.add(key)
-                listed = _cohort_dosages(calls, people)
-                if gene_index is not None and listed:
-                    gene_records.append((int(pos), pos, ref, alt, listed))
-                result = _contrast(listed, people, members, fcap)
-                if result is None:
-                    continue
-                n_families, n_informative, z, p_exact = result
-                pending.append(
-                    {
-                        "CHROM": chrom,
-                        "POS": pos,
-                        "ID": variant_id,
-                        "REF": ref,
-                        "ALT": alt,
-                        "n_families": n_families,
-                        "n_informative": n_informative,
-                        "z": "" if z is None else format(z, ".12g"),
-                        "p_exact": format(p_exact, ".12g"),
-                    }
-                )
-        variants, gene_rows = _flush_chromosome(
-            current_chrom,
-            pending,
-            gene_records,
-            prefix,
-            writer,
-            gene_writer,
-            output_dir,
-            gene_index,
-            gene_names or {},
-            gene_types or {},
-            people,
-            members,
-            fcap,
-            score_source,
-            score_writer,
-        )
-        written += variants
-        gene_written += gene_rows
-        if current_chrom:
-            print(f"finished processing {current_chrom}", flush=True)
+        if score_plan is not None:
+            assert score_source is not None
+            assert gene_index is not None
+            written, gene_written = _process_score_shards(
+                score_plan,
+                prefix,
+                writer,
+                output_dir,
+                gene_index,
+                gene_names or {},
+                gene_types or {},
+                people,
+                members,
+                fcap,
+                score_source,
+                score_writer,
+            )
+        else:
+            written, gene_written = _process_files(
+                files,
+                prefix,
+                writer,
+                gene_writer,
+                output_dir,
+                gene_index,
+                gene_names or {},
+                gene_types or {},
+                people,
+                members,
+                fcap,
+                score_source,
+                score_writer,
+            )
     finally:
         if handle is not None:
             handle.close()
@@ -234,6 +205,230 @@ def compute_transmission(
         if score_handle is not None:
             score_handle.close()
     return written, gene_written
+
+
+def _process_files(
+    files: list[Path],
+    prefix: str,
+    writer: csv.DictWriter | None,
+    gene_writer: csv.DictWriter | None,
+    output_dir: Path | None,
+    gene_index: dict[str, list[tuple[int, int, str]]] | None,
+    gene_names: dict[str, str],
+    gene_types: dict[str, str],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None,
+    score_source: ScoreSource | None,
+    score_writer: csv.DictWriter | None,
+) -> tuple[int, int]:
+    written = 0
+    gene_written = 0
+    seen: set[tuple[str, str, str, str]] = set()
+    pending: list[dict[str, object]] = []
+    gene_records: list[tuple[int, str, str, str, dict[str, int]]] = []
+    current_chrom = ""
+    for path in files:
+        chrom_name = path.parent.name
+        if chrom_name != current_chrom:
+            variants, gene_rows = _flush_chromosome(
+                current_chrom,
+                pending,
+                gene_records,
+                prefix,
+                writer,
+                gene_writer,
+                output_dir,
+                gene_index,
+                gene_names,
+                gene_types,
+                people,
+                members,
+                fcap,
+                score_source,
+                score_writer,
+            )
+            written += variants
+            gene_written += gene_rows
+            if current_chrom:
+                print(f"finished processing {current_chrom}", flush=True)
+            current_chrom = chrom_name
+            seen.clear()
+        _read_site_file(path, seen, pending, gene_records, people, members, fcap, gene_index is not None)
+    variants, gene_rows = _flush_chromosome(
+        current_chrom,
+        pending,
+        gene_records,
+        prefix,
+        writer,
+        gene_writer,
+        output_dir,
+        gene_index,
+        gene_names,
+        gene_types,
+        people,
+        members,
+        fcap,
+        score_source,
+        score_writer,
+    )
+    written += variants
+    gene_written += gene_rows
+    if current_chrom:
+        print(f"finished processing {current_chrom}", flush=True)
+    return written, gene_written
+
+
+def _process_score_shards(
+    plan: list[tuple[str, list[tuple[Path, Path, int, int]]]],
+    prefix: str,
+    writer: csv.DictWriter | None,
+    output_dir: Path | None,
+    gene_index: dict[str, list[tuple[int, int, str]]],
+    gene_names: dict[str, str],
+    gene_types: dict[str, str],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None,
+    score_source: ScoreSource,
+    score_writer: csv.DictWriter | None,
+) -> tuple[int, int]:
+    written = 0
+    gene_written = 0
+    fields = score_fieldnames(score_source.columns)
+    open_scores: dict[str, tuple[object, csv.DictWriter]] = {}
+    try:
+        for chrom, shards in plan:
+            pending: list[dict[str, object]] = []
+            seen: set[tuple[str, str, str, str]] = set()
+            records: list[tuple[int, str, str, str, dict[str, int]]] = []
+            intervals = _intervals_for(chrom, gene_index)
+            report_long_genes(
+                chrom,
+                intervals,
+                [(start, end) for _sites, _shard, start, end in shards],
+                gene_names,
+            )
+            running = GeneScores(chrom, intervals, gene_names, gene_types, people, members, score_source)
+            for index, (sites_path, shard, _start, _end) in enumerate(shards):
+                records.clear()
+                _read_site_file(sites_path, seen, pending, records, people, members, fcap, True)
+                if records:
+                    running.add(records, _load_shard_scores(score_source, chrom, shard, records))
+                next_start = shards[index + 1][2] if index + 1 < len(shards) else None
+                gene_written += _append_score_rows(
+                    chrom,
+                    running.emit(None if next_start is None else next_start),
+                    fields,
+                    prefix,
+                    output_dir,
+                    score_writer,
+                    open_scores,
+                )
+            variants, _gene_rows = _flush_chromosome(
+                chrom,
+                pending,
+                [],
+                prefix,
+                writer,
+                None,
+                output_dir,
+                None,
+                {},
+                {},
+                people,
+                members,
+                fcap,
+                None,
+                None,
+            )
+            written += variants
+            print(f"finished processing {chrom}", flush=True)
+    finally:
+        for handle, _score_writer in open_scores.values():
+            handle.close()
+    return written, gene_written
+
+
+def _load_shard_scores(
+    score_source: ScoreSource,
+    chrom: str,
+    shard: Path,
+    records: list[tuple[int, str, str, str, dict[str, int]]],
+):
+    if score_source.kind == "otari":
+        needed = {_variant_id(chrom, pos, ref, alt) for _pos, pos, ref, alt, _dosages in records}
+        return load_otari_shard(shard, score_source.columns, needed)
+    needed_labels: set[tuple[str, str, str, str]] = set()
+    for _pos, pos, ref, alt, _dosages in records:
+        for alias in _chrom_aliases(chrom):
+            needed_labels.add((alias, pos, ref, alt))
+    return _load_seqweaver(shard, score_source.columns, needed_labels)
+
+
+def _append_score_rows(
+    chrom: str,
+    rows: list[dict[str, object]],
+    fields: list[str],
+    prefix: str,
+    output_dir: Path | None,
+    score_writer: csv.DictWriter | None,
+    open_scores: dict[str, tuple[object, csv.DictWriter]],
+) -> int:
+    if not rows:
+        return 0
+    if output_dir is not None:
+        if chrom not in open_scores:
+            path = output_dir / chrom / f"{prefix}.gene_scores.tsv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("w", encoding="utf-8", newline="")
+            chrom_writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
+            chrom_writer.writeheader()
+            open_scores[chrom] = (handle, chrom_writer)
+        open_scores[chrom][1].writerows(rows)
+    elif score_writer is not None:
+        score_writer.writerows(rows)
+    return len(rows)
+
+
+def _read_site_file(
+    path: Path,
+    seen: set[tuple[str, str, str, str]],
+    pending: list[dict[str, object]],
+    gene_records: list[tuple[int, str, str, str, dict[str, int]]],
+    people: dict[str, tuple[str, str]],
+    members: dict[str, list[tuple[str, bool]]],
+    fcap: int | None,
+    keep_genes: bool,
+) -> None:
+    for row in _iter_rows(path):
+        if row is None:
+            continue
+        chrom, pos, variant_id, ref, alt, calls = row
+        key = (chrom, pos, ref, alt)
+        if key in seen:
+            raise ValueError(f"duplicate variant {chrom} {pos} {ref} {alt}")
+        seen.add(key)
+        listed = _cohort_dosages(calls, people)
+        if keep_genes and listed:
+            gene_records.append((int(pos), pos, ref, alt, listed))
+        result = _contrast(listed, people, members, fcap)
+        if result is None:
+            continue
+        n_families, n_informative, z, p_exact = result
+        pending.append(
+            {
+                "CHROM": chrom,
+                "POS": pos,
+                "ID": variant_id,
+                "REF": ref,
+                "ALT": alt,
+                "n_families": n_families,
+                "n_informative": n_informative,
+                "z": "" if z is None else format(z, ".12g"),
+                "p_exact": format(p_exact, ".12g"),
+            }
+        )
 
 
 def _flush_chromosome(

@@ -15,6 +15,8 @@ from pheno.burden import _variant_id
 from pheno.gene_burden import _chrom_aliases, _genes_at, _intervals_for, _unversioned_gene_id
 
 _CHROM_DIR = re.compile(r"^chr(\d+|X|Y)$")
+_SHARD_NAME = re.compile(r"^(\d+)_(\d+)$")
+_SEQWEAVER_SHARD = re.compile(r"^(?:variants_)?(\d+)_(\d+)$")
 _OTARI_TABLE = "variant_effects_comprehensive.tsv"
 _OTARI_GENES = "interpretability_analysis.tsv"
 _SKIPPED_OTARI = {"variant_id", "transcript_id", "max_effect", "mean_effect"}
@@ -81,6 +83,106 @@ def prepare_score_source(
     return source
 
 
+def paired_otari_shards(
+    input_dir: Path,
+    otari_dir: Path,
+    prefix: str,
+) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
+    """Pair site files with Otari shard directories that use the same start and end.
+
+    Each entry is ``(sites file, Otari shard directory, start, end)`` in position order.
+    """
+    return _pair_shards(input_dir, prefix, otari_dir, _otari_shard_dirs, "otari")
+
+
+def paired_seqweaver_shards(
+    input_dir: Path,
+    seqweaver_dir: Path,
+    prefix: str,
+) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
+    """Pair site files with Seqweaver directories named ``variants_START_END`` or ``START_END``."""
+    return _pair_shards(input_dir, prefix, seqweaver_dir, _seqweaver_shard_dirs, "seqweaver")
+
+
+def _pair_shards(
+    input_dir: Path,
+    prefix: str,
+    model_dir: Path,
+    discover,
+    label: str,
+) -> list[tuple[str, list[tuple[Path, Path, int, int]]]]:
+    pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)_(\d+)\.tsv$")
+    plan: list[tuple[str, list[tuple[Path, Path, int, int]]]] = []
+    found_sites = False
+    for chrom_dir in _chrom_dirs(input_dir):
+        loose = [path for path in chrom_dir.glob(f"{prefix}*.tsv") if path.is_file()]
+        if not loose:
+            continue
+        found_sites = True
+        sites: dict[tuple[int, int], Path] = {}
+        for path in loose:
+            match = pattern.fullmatch(path.name)
+            if match is None:
+                raise ValueError(f"{path.name} does not match {prefix}_START_END.tsv")
+            key = (int(match.group(1)), int(match.group(2)))
+            if key in sites:
+                raise ValueError(f"duplicate shard {chrom_dir.name} {key[0]}_{key[1]}")
+            sites[key] = path
+        model = discover(model_dir / chrom_dir.name)
+        if set(sites) != set(model):
+            raise ValueError(
+                f"{chrom_dir.name} shard splits differ: "
+                f"sites has {_shard_text(sorted(sites))}, "
+                f"{label} has {_shard_text(sorted(model))}"
+            )
+        plan.append((chrom_dir.name, [(sites[key], model[key], key[0], key[1]) for key in sorted(sites)]))
+    if not found_sites:
+        raise ValueError(f"no {prefix}_START_END.tsv files under {input_dir}")
+    return plan
+
+
+def _otari_shard_dirs(chrom_dir: Path) -> dict[tuple[int, int], Path]:
+    found: dict[tuple[int, int], Path] = {}
+    if not chrom_dir.is_dir():
+        return found
+    for path in chrom_dir.iterdir():
+        match = _SHARD_NAME.fullmatch(path.name)
+        if path.is_dir() and match is not None and (path / _OTARI_TABLE).is_file():
+            found[(int(match.group(1)), int(match.group(2)))] = path
+    return found
+
+
+def _seqweaver_shard_dirs(chrom_dir: Path) -> dict[tuple[int, int], Path]:
+    found: dict[tuple[int, int], Path] = {}
+    if not chrom_dir.is_dir():
+        return found
+    for path in chrom_dir.iterdir():
+        match = _SEQWEAVER_SHARD.fullmatch(path.name)
+        if not path.is_dir() or match is None or not _has_seqweaver_matrix(path):
+            continue
+        key = (int(match.group(1)), int(match.group(2)))
+        if key in found:
+            raise ValueError(f"duplicate seqweaver shard {chrom_dir.name} {key[0]}_{key[1]}")
+        found[key] = path
+    return found
+
+
+def _has_seqweaver_matrix(shard: Path) -> bool:
+    return any(
+        path.is_file() and path.parent.name == "seqweaver_human"
+        for path in shard.rglob("annot.*diffs.h5")
+    )
+
+
+def _shard_text(shards: list[tuple[int, int]]) -> str:
+    labels = [f"{start}_{end}" for start, end in shards]
+    if len(labels) > 6:
+        return ", ".join(labels[:6]) + f", ... ({len(labels)} shards)"
+    if not labels:
+        return "none"
+    return ", ".join(labels)
+
+
 def load_chromosome_scores(
     source: ScoreSource,
     chrom: str,
@@ -118,6 +220,201 @@ def score_vector(
     return None
 
 
+def load_otari_shard(
+    shard: Path,
+    columns: list[str],
+    needed: set[str],
+) -> dict[tuple[str, str], np.ndarray]:
+    """Collapse transcripts in one ``start_end`` Otari directory."""
+    if not needed:
+        return {}
+    table = shard / _OTARI_TABLE
+    gene_map = shard / _OTARI_GENES
+    if not gene_map.is_file():
+        raise ValueError(f"{table} is missing {gene_map.name}")
+    grouped = _read_otari_shard(table, gene_map, columns, needed)
+    return {key: _collapse_transcripts(rows) for key, rows in grouped.items()}
+
+
+def gene_shard_covers(
+    intervals: list[tuple[int, int, str]],
+    shards: list[tuple[int, int]],
+) -> list[tuple[str, int, int, list[tuple[int, int]]]]:
+    """How many shards a gene stays open across.
+
+    The span is the gene's lowest start through its highest end, which already
+    includes the window. A gene stays open from the first shard that overlaps
+    that span through the last shard that still starts at or before the end.
+    """
+    bounds: dict[str, list[int]] = {}
+    for lo, hi, gene_id in intervals:
+        current = bounds.get(gene_id)
+        if current is None:
+            bounds[gene_id] = [lo, hi]
+        else:
+            current[0] = min(current[0], lo)
+            current[1] = max(current[1], hi)
+    ordered = sorted(shards)
+    found: list[tuple[str, int, int, list[tuple[int, int]]]] = []
+    for gene_id, (lo, hi) in bounds.items():
+        covered = [(start, end) for start, end in ordered if start <= hi and end >= lo]
+        if not covered:
+            continue
+        first = covered[0][0]
+        held = [(start, end) for start, end in ordered if first <= start <= hi]
+        found.append((gene_id, lo, hi, held))
+    found.sort(key=lambda item: (-len(item[3]), item[1], item[0]))
+    return found
+
+
+def report_long_genes(
+    chrom: str,
+    intervals: list[tuple[int, int, str]],
+    shards: list[tuple[int, int]],
+    gene_names: dict[str, str],
+    minimum: int = 3,
+) -> int:
+    """Print genes that stay open across ``minimum`` or more shards. Returns that count."""
+    covers = gene_shard_covers(intervals, shards)
+    long = [item for item in covers if len(item[3]) >= minimum]
+    if not long:
+        if covers:
+            longest = max(len(item[3]) for item in covers)
+            print(
+                f"{chrom}: no gene spans {minimum} or more shards (longest span is {longest})",
+                flush=True,
+            )
+        else:
+            print(f"{chrom}: no gene spans {minimum} or more shards", flush=True)
+        return 0
+    for gene_id, lo, hi, held in long:
+        name = gene_names.get(gene_id, "")
+        label = f"{gene_id} {name}".rstrip()
+        ranges = ", ".join(f"{start}_{end}" for start, end in held)
+        print(
+            f"{chrom}: {label} ({lo}-{hi}) spans {len(held)} shards and stays open across {ranges}",
+            flush=True,
+        )
+    noun = "gene spans" if len(long) == 1 else "genes span"
+    print(f"{chrom}: {len(long)} {noun} {minimum} or more shards", flush=True)
+    return len(long)
+
+
+class GeneScores:
+    """Running per-gene totals. Genes are emitted once no later shard can add to them."""
+
+    def __init__(
+        self,
+        chrom: str,
+        intervals: list[tuple[int, int, str]],
+        gene_names: dict[str, str],
+        gene_types: dict[str, str],
+        people: dict[str, tuple[str, str]],
+        members: dict[str, list[tuple[str, bool]]],
+        source: ScoreSource,
+    ) -> None:
+        self.chrom = chrom
+        self.intervals = intervals
+        self.gene_names = gene_names
+        self.gene_types = gene_types
+        self.people = people
+        self.members = members
+        self.source = source
+        self.reach: dict[str, int] = {}
+        for _lo, hi, gene_id in intervals:
+            current = self.reach.get(gene_id)
+            if current is None or hi > current:
+                self.reach[gene_id] = hi
+        self.counts: dict[str, int] = defaultdict(int)
+        self.scored: dict[str, int] = defaultdict(int)
+        self.carriers: dict[str, set[str]] = defaultdict(set)
+        self.weights: dict[str, dict[str, np.ndarray]] = {}
+        self.first_pos: dict[str, int] = {}
+
+    def add(
+        self,
+        records: list[tuple[int, str, str, str, dict[str, int]]],
+        loaded: dict[tuple[str, str], np.ndarray] | dict[tuple[str, str, str, str], np.ndarray],
+    ) -> None:
+        if not records or not self.intervals:
+            return
+        records.sort(key=lambda item: (item[0], item[2], item[3]))
+        assigned = _genes_at([pos for pos, _text, _ref, _alt, _dosages in records], self.intervals)
+        width = len(self.source.columns)
+        for (pos, pos_text, ref, alt, dosages), gene_ids in zip(records, assigned):
+            for gene_id in gene_ids:
+                self.counts[gene_id] += 1
+                if gene_id not in self.first_pos or pos < self.first_pos[gene_id]:
+                    self.first_pos[gene_id] = pos
+                self.carriers[gene_id].update(dosages)
+                values = score_vector(loaded, self.source, self.chrom, pos_text, ref, alt, gene_id)
+                if values is None:
+                    continue
+                self.scored[gene_id] += 1
+                bucket = self.weights.setdefault(gene_id, {})
+                for person, dosage in dosages.items():
+                    current = bucket.get(person)
+                    if current is None:
+                        current = np.zeros(width, dtype=np.float64)
+                        bucket[person] = current
+                    current += dosage * values
+
+    def emit(self, before: int | None) -> list[dict[str, object]]:
+        """Write genes that end before ``before``. ``None`` writes every gene still open."""
+        ready = [
+            gene_id
+            for gene_id in self.counts
+            if before is None or self.reach.get(gene_id, -1) < before
+        ]
+        ready.sort(key=lambda gene_id: (self.first_pos[gene_id], gene_id))
+        rows: list[dict[str, object]] = []
+        for gene_id in ready:
+            row = self._row(gene_id)
+            if row is not None:
+                rows.append(row)
+            self._drop(gene_id)
+        return rows
+
+    def _row(self, gene_id: str) -> dict[str, object] | None:
+        summary = _summarize(
+            self.carriers[gene_id],
+            self.weights.get(gene_id, {}),
+            self.people,
+            self.members,
+            len(self.source.columns),
+        )
+        if summary is None:
+            return None
+        n_families, informative, z_values = summary
+        row: dict[str, object] = {
+            "CHROM": self.chrom,
+            "gene": gene_id,
+            "gene_name": self.gene_names.get(gene_id, ""),
+            "gene_type": self.gene_types.get(gene_id, ""),
+            "n_variants": self.counts[gene_id],
+            "n_families": n_families,
+            "n_scored": self.scored[gene_id],
+        }
+        for index, column in enumerate(self.source.columns):
+            count = int(informative[index])
+            row[f"{column}_n_informative"] = count
+            if count == 0:
+                row[f"{column}_z"] = ""
+                row[f"{column}_p"] = format(1.0, ".12g")
+            else:
+                z_value = float(z_values[index])
+                row[f"{column}_z"] = format(z_value, ".12g")
+                row[f"{column}_p"] = format(float(2.0 * norm.sf(abs(z_value))), ".12g")
+        return row
+
+    def _drop(self, gene_id: str) -> None:
+        del self.counts[gene_id]
+        self.scored.pop(gene_id, None)
+        self.carriers.pop(gene_id, None)
+        self.weights.pop(gene_id, None)
+        self.first_pos.pop(gene_id, None)
+
+
 def gene_score_rows(
     chrom: str,
     records: list[tuple[int, str, str, str, dict[str, int]]],
@@ -130,63 +427,12 @@ def gene_score_rows(
     loaded: dict[tuple[str, str], np.ndarray] | dict[tuple[str, str, str, str], np.ndarray],
 ) -> list[dict[str, object]]:
     """One wide row per gene. ``p`` is the two-sided normal tail of ``z``."""
-    if not records:
-        return []
-    records.sort(key=lambda item: (item[0], item[2], item[3]))
     intervals = _intervals_for(chrom, gene_index)
-    if not intervals:
+    if not records or not intervals:
         return []
-    assigned = _genes_at([pos for pos, _text, _ref, _alt, _dosages in records], intervals)
-    counts: dict[str, int] = defaultdict(int)
-    scored: dict[str, int] = defaultdict(int)
-    carriers: dict[str, set[str]] = defaultdict(set)
-    weights: dict[str, dict[str, np.ndarray]] = {}
-    first_pos: dict[str, int] = {}
-    width = len(source.columns)
-    for (pos, pos_text, ref, alt, dosages), gene_ids in zip(records, assigned):
-        for gene_id in gene_ids:
-            counts[gene_id] += 1
-            if gene_id not in first_pos or pos < first_pos[gene_id]:
-                first_pos[gene_id] = pos
-            carriers[gene_id].update(dosages)
-            values = score_vector(loaded, source, chrom, pos_text, ref, alt, gene_id)
-            if values is None:
-                continue
-            scored[gene_id] += 1
-            bucket = weights.setdefault(gene_id, {})
-            for person, dosage in dosages.items():
-                current = bucket.get(person)
-                if current is None:
-                    current = np.zeros(width, dtype=np.float64)
-                    bucket[person] = current
-                current += dosage * values
-    rows: list[dict[str, object]] = []
-    for gene_id in sorted(counts, key=lambda gene: (first_pos[gene], gene)):
-        summary = _summarize(carriers[gene_id], weights.get(gene_id, {}), people, members, width)
-        if summary is None:
-            continue
-        n_families, informative, z_values = summary
-        row: dict[str, object] = {
-            "CHROM": chrom,
-            "gene": gene_id,
-            "gene_name": gene_names.get(gene_id, ""),
-            "gene_type": gene_types.get(gene_id, ""),
-            "n_variants": counts[gene_id],
-            "n_families": n_families,
-            "n_scored": scored[gene_id],
-        }
-        for index, column in enumerate(source.columns):
-            count = int(informative[index])
-            row[f"{column}_n_informative"] = count
-            if count == 0:
-                row[f"{column}_z"] = ""
-                row[f"{column}_p"] = format(1.0, ".12g")
-            else:
-                z_value = float(z_values[index])
-                row[f"{column}_z"] = format(z_value, ".12g")
-                row[f"{column}_p"] = format(float(2.0 * norm.sf(abs(z_value))), ".12g")
-        rows.append(row)
-    return rows
+    running = GeneScores(chrom, intervals, gene_names, gene_types, people, members, source)
+    running.add(records, loaded)
+    return running.emit(None)
 
 
 def _summarize(
@@ -279,41 +525,50 @@ def _load_otari(
         gene_map = shard / _OTARI_GENES
         if not gene_map.is_file():
             raise ValueError(f"{table} is missing {gene_map.name}")
-        mapping = _transcript_genes(gene_map, needed)
-        with table.open(encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle, delimiter="\t")
-            fieldnames = reader.fieldnames or []
-            file_columns = [name for name in fieldnames if name not in _SKIPPED_OTARI]
-            if file_columns != columns:
-                raise ValueError(f"{table} score columns do not match")
-            for row in reader:
-                variant_id = (row.get("variant_id") or "").strip()
-                if variant_id not in needed:
+        for key, rows in _read_otari_shard(table, gene_map, columns, needed).items():
+            grouped[key].extend(rows)
+    return {key: _collapse_transcripts(rows) for key, rows in grouped.items()}
+
+
+def _read_otari_shard(
+    table: Path,
+    gene_map: Path,
+    columns: list[str],
+    needed: set[str],
+) -> dict[tuple[str, str], list[np.ndarray]]:
+    grouped: dict[tuple[str, str], list[np.ndarray]] = defaultdict(list)
+    mapping = _transcript_genes(gene_map, needed)
+    with table.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        file_columns = [name for name in fieldnames if name not in _SKIPPED_OTARI]
+        if file_columns != columns:
+            raise ValueError(f"{table} score columns do not match")
+        for row in reader:
+            variant_id = (row.get("variant_id") or "").strip()
+            if variant_id not in needed:
+                continue
+            transcript_id = (row.get("transcript_id") or "").strip()
+            gene_id = mapping.get((variant_id, transcript_id))
+            if not gene_id:
+                continue
+            parsed: list[float] = []
+            complete = True
+            for column in columns:
+                cell = (row.get(column) or "").strip()
+                if not cell:
+                    complete = False
                     continue
-                transcript_id = (row.get("transcript_id") or "").strip()
-                gene_id = mapping.get((variant_id, transcript_id))
-                if not gene_id:
-                    continue
-                parsed: list[float] = []
-                complete = True
-                for column in columns:
-                    cell = (row.get(column) or "").strip()
-                    if not cell:
-                        complete = False
-                        continue
-                    try:
-                        value = float(cell)
-                    except ValueError as exc:
-                        raise ValueError(f"{table} has a non-numeric {column} for {variant_id}") from exc
-                    if not math.isfinite(value):
-                        complete = False
-                    parsed.append(value)
-                if complete and len(parsed) == len(columns):
-                    grouped[(variant_id, gene_id)].append(np.asarray(parsed, dtype=np.float64))
-    collapsed: dict[tuple[str, str], np.ndarray] = {}
-    for key, rows in grouped.items():
-        collapsed[key] = _collapse_transcripts(rows)
-    return collapsed
+                try:
+                    value = float(cell)
+                except ValueError as exc:
+                    raise ValueError(f"{table} has a non-numeric {column} for {variant_id}") from exc
+                if not math.isfinite(value):
+                    complete = False
+                parsed.append(value)
+            if complete and len(parsed) == len(columns):
+                grouped[(variant_id, gene_id)].append(np.asarray(parsed, dtype=np.float64))
+    return grouped
 
 
 def _collapse_transcripts(rows: list[np.ndarray]) -> np.ndarray:

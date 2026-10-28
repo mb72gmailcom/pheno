@@ -9,6 +9,7 @@ from pheno.cli_transmission import main
 from pheno.gene_burden import load_analysis_groups
 from pheno.mapping import load_column_map
 from pheno.transmission import compute_transmission
+from pheno.transmission_scores import gene_shard_covers
 
 FAMILY = """\
 person	family	mother	father	sex	asd
@@ -374,6 +375,135 @@ def test_otari_weights_keep_the_strongest_signed_transcript(tmp_path: Path):
     assert float(variants["100"]["p_exact"]) == pytest.approx(1)
 
 
+def _score_shard(root: Path, chrom: str, shard: str, rows: str) -> None:
+    directory = root / chrom / shard
+    directory.mkdir(parents=True)
+    (directory / "variant_effects_comprehensive.tsv").write_text(
+        "variant_id\ttranscript_id\tBrain\n" + rows,
+        encoding="utf-8",
+    )
+    interpreted = "".join(
+        f"{line.split(chr(9))[0]}\tENSG00000000002\t{line.split(chr(9))[1]}\n"
+        if "21_150_" not in line
+        else f"{line.split(chr(9))[0]}\tENSG00000000001\t{line.split(chr(9))[1]}\n"
+        for line in rows.splitlines()
+        if line
+    )
+    (directory / "interpretability_analysis.tsv").write_text(
+        "variant_id\tgene_id\ttranscript_id\n" + interpreted,
+        encoding="utf-8",
+    )
+
+
+def test_otari_keeps_a_gene_open_until_the_next_shard(tmp_path: Path):
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_1000.tsv", "chr21\t150\t.\tG\tA\tA=0/0|0/1|0/1|99\nchr21\t900\t.\tC\tT\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chr21" / "inherited_1001_2000.tsv", "chr21\t1200\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t100\t200\t+\tEARLY\tgene_id "ENSG00000000001.1"; '
+        'gene_type "protein_coding"; gene_name "EARLY";\n'
+        'gene\tchr21\t500\t1500\t+\tSPAN\tgene_id "ENSG00000000002.1"; '
+        'gene_type "protein_coding"; gene_name "SPAN";\n',
+        encoding="utf-8",
+    )
+    otari = tmp_path / "otari"
+    _score_shard(otari, "chr21", "1_1000", "21_150_G_A_hg38\tt1\t1\n21_900_C_T_hg38\tt1\t1\n")
+    _score_shard(otari, "chr21", "1001_2000", "21_1200_A_G_hg38\tt1\t1\n")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        otari_dir=otari,
+    )
+    rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
+    assert [row["gene_name"] for row in rows] == ["EARLY", "SPAN"]
+    assert rows[1]["n_variants"] == "2"
+    assert rows[1]["n_scored"] == "2"
+    assert float(rows[1]["Brain_z"]) == pytest.approx(1)
+
+
+def test_gene_shard_cover_counts_the_outer_span():
+    shards = [(1, 1000), (1001, 2000), (2001, 3000)]
+    short = gene_shard_covers([(100, 200, "EARLY"), (500, 1500, "SPAN")], shards)
+    by_gene = {gene_id: held for gene_id, _lo, _hi, held in short}
+    assert [item[0] for item in by_gene["EARLY"]] == [1]
+    assert [item[0] for item in by_gene["SPAN"]] == [1, 1001]
+    long = gene_shard_covers([(100, 2600, "LONG")], shards)
+    assert [item[0] for item in long[0][3]] == [1, 1001, 2001]
+
+
+def test_a_gene_spanning_three_shards_is_printed(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_1000.tsv", "chr21\t500\t.\tC\tT\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chr21" / "inherited_1001_2000.tsv", "chr21\t1500\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chr21" / "inherited_2001_3000.tsv", "chr21\t2500\t.\tG\tC\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t100\t200\t+\tEARLY\tgene_id "ENSG00000000001.1"; '
+        'gene_type "protein_coding"; gene_name "EARLY";\n'
+        'gene\tchr21\t100\t2600\t+\tLONG\tgene_id "ENSG00000000002.1"; '
+        'gene_type "protein_coding"; gene_name "LONG";\n',
+        encoding="utf-8",
+    )
+    otari = tmp_path / "otari"
+    _score_shard(otari, "chr21", "1_1000", "21_500_C_T_hg38\tt1\t1\n")
+    _score_shard(otari, "chr21", "1001_2000", "21_1500_A_G_hg38\tt1\t1\n")
+    _score_shard(otari, "chr21", "2001_3000", "21_2500_G_C_hg38\tt1\t1\n")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        otari_dir=otari,
+    )
+    printed = capsys.readouterr().out
+    assert "ENSG00000000002 LONG (100-2600) spans 3 shards and stays open across 1_1000, 1001_2000, 2001_3000" in printed
+    assert "chr21: 1 gene spans 3 or more shards" in printed
+    assert "EARLY" not in printed
+    rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
+    assert [row["gene_name"] for row in rows] == ["LONG"]
+    assert rows[0]["n_variants"] == "3"
+
+
+def test_otari_shard_splits_must_match(tmp_path: Path):
+    source = tmp_path / "results" / "chr21"
+    source.mkdir(parents=True)
+    (source / "inherited_1_1000.tsv").write_text(HEADER, encoding="utf-8")
+    (source / "inherited_1001_2000.tsv").write_text(HEADER, encoding="utf-8")
+    otari = tmp_path / "otari"
+    _score_shard(otari, "chr21", "1_1000", "")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    with pytest.raises(ValueError, match="chr21 shard splits differ"):
+        compute_transmission(
+            source.parent,
+            "inherited",
+            people,
+            output_dir=output_dir,
+            genes=tmp_path / "genes.tsv",
+            otari_dir=otari,
+        )
+    assert not output_dir.exists()
+
+
 def test_seqweaver_uses_label_coordinates_and_the_first_duplicate(tmp_path: Path):
     source = tmp_path / "results"
     _write(source / "chr21" / "inherited_1_20.tsv", "chr21\t10\t.\tG\tA\tA=0/0|0/1|0/1|99\n")
@@ -396,12 +526,12 @@ def test_seqweaver_uses_label_coordinates_and_the_first_duplicate(tmp_path: Path
         "chrom pos name ref alt strand ref_match contains_unk\n"
         "chr21 10 . G A + True False\n"
     )
-    write_h5("variants_00000", "annot.variants_00000_diffs.h5", [[1.0]], label)
-    write_h5("variants_00001", "annot.variants_00001_diffs.h5", [[-1.0]], label)
+    write_h5("variants_1_20/a", "annot.variants_00000_diffs.h5", [[1.0]], label)
+    write_h5("variants_1_20/b", "annot.variants_00001_diffs.h5", [[-1.0]], label)
     import numpy as np
 
     write_h5(
-        "variants_00002",
+        "variants_1_20/c",
         "annot.variants_00002_diffs.h5",
         np.zeros((0, 1)),
         "chrom\tpos\tname\tref\talt\tstrand\tref_match\tcontains_unk\n",
@@ -449,7 +579,7 @@ def test_seqweaver_header_only_file_must_match_the_matrix(tmp_path: Path):
         tmp_path
         / "seqweaver"
         / "chr21"
-        / "variants_00000"
+        / "variants_1_20"
         / "seqweaver_human"
         / "annot.variants_00000_diffs.h5"
     )
@@ -474,6 +604,97 @@ def test_seqweaver_header_only_file_must_match_the_matrix(tmp_path: Path):
             seqweaver_dir=tmp_path / "seqweaver",
             column_names=names,
         )
+
+
+def test_seqweaver_keeps_a_gene_open_until_the_next_shard(tmp_path: Path):
+    import h5py
+
+    source = tmp_path / "results"
+    _write(source / "chr21" / "inherited_1_1000.tsv", "chr21\t900\t.\tC\tT\tA=0/0|0/1|0/1|99\n")
+    _write(source / "chr21" / "inherited_1001_2000.tsv", "chr21\t1200\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    annotation = tmp_path / "genes.tsv"
+    annotation.write_text(
+        "feature\tchr\tstart\tend\tstrand\tname\tattributes\n"
+        'gene\tchr21\t500\t1500\t+\tSPAN\tgene_id "ENSG00000000002.1"; '
+        'gene_type "protein_coding"; gene_name "SPAN";\n',
+        encoding="utf-8",
+    )
+
+    def write_h5(shard: str, pos: str, ref: str, alt: str) -> None:
+        path = (
+            tmp_path
+            / "seqweaver"
+            / "chr21"
+            / shard
+            / "seqweaver_human"
+            / f"annot.{shard}_diffs.h5"
+        )
+        path.parent.mkdir(parents=True)
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("data", data=[[1.0]])
+        path.with_name(f"annot.{shard}_row_labels.txt").write_text(
+            "chrom pos name ref alt strand ref_match contains_unk\n"
+            f"chr21 {pos} . {ref} {alt} + True False\n",
+            encoding="utf-8",
+        )
+
+    write_h5("variants_1_1000", "900", "C", "T")
+    write_h5("variants_1001_2000", "1200", "A", "G")
+    names = tmp_path / "seqweaver.colnames"
+    names.write_text("track\n", encoding="utf-8")
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    compute_transmission(
+        source,
+        "inherited",
+        people,
+        output_dir=output_dir,
+        genes=annotation,
+        window=0,
+        seqweaver_dir=tmp_path / "seqweaver",
+        column_names=names,
+    )
+    rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
+    assert len(rows) == 1
+    assert rows[0]["n_variants"] == "2"
+    assert rows[0]["n_scored"] == "2"
+    assert float(rows[0]["track_z"]) == pytest.approx(1)
+
+
+def test_seqweaver_shard_splits_must_match(tmp_path: Path):
+    source = tmp_path / "results" / "chr21"
+    source.mkdir(parents=True)
+    (source / "inherited_1_1000.tsv").write_text(HEADER, encoding="utf-8")
+    (source / "inherited_1001_2000.tsv").write_text(HEADER, encoding="utf-8")
+    matrix = (
+        tmp_path
+        / "seqweaver"
+        / "chr21"
+        / "variants_1_1000"
+        / "seqweaver_human"
+        / "annot.variants_1_1000_diffs.h5"
+    )
+    matrix.parent.mkdir(parents=True)
+    matrix.write_bytes(b"")
+    names = tmp_path / "seqweaver.colnames"
+    names.write_text("track\n", encoding="utf-8")
+    family = tmp_path / "family.tsv"
+    _pair_family(family)
+    people, _n_asd, _n_siblings = load_analysis_groups(family, load_column_map(None))
+    output_dir = tmp_path / "by-chrom"
+    with pytest.raises(ValueError, match="seqweaver has"):
+        compute_transmission(
+            source.parent,
+            "inherited",
+            people,
+            output_dir=output_dir,
+            genes=tmp_path / "genes.tsv",
+            seqweaver_dir=tmp_path / "seqweaver",
+            column_names=names,
+        )
+    assert not output_dir.exists()
 
 
 def test_model_score_flags_are_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
