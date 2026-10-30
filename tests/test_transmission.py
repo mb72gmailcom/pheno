@@ -479,7 +479,7 @@ def _score_shard(root: Path, chrom: str, shard: str, rows: str) -> None:
     )
 
 
-def test_otari_keeps_a_gene_open_until_the_next_shard(tmp_path: Path):
+def test_otari_keeps_a_gene_open_until_the_next_shard(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     source = tmp_path / "results"
     _write(source / "chr21" / "inherited_1_1000.tsv", "chr21\t150\t.\tG\tA\tA=0/0|0/1|0/1|99\nchr21\t900\t.\tC\tT\tA=0/0|0/1|0/1|99\n")
     _write(source / "chr21" / "inherited_1001_2000.tsv", "chr21\t1200\t.\tA\tG\tA=0/0|0/1|0/1|99\n")
@@ -513,6 +513,9 @@ def test_otari_keeps_a_gene_open_until_the_next_shard(tmp_path: Path):
     assert rows[1]["n_variants"] == "2"
     assert rows[1]["n_scored"] == "2"
     assert float(rows[1]["Brain_z"]) == pytest.approx(1)
+    printed = capsys.readouterr().out
+    assert "chr21 shard 1_1000: variants 2, assigned 2, gene rows 1, still open 1" in printed
+    assert "chr21 shard 1001_2000: variants 1, assigned 1, gene rows 1, still open 0" in printed
 
 
 def test_gene_shard_cover_counts_the_outer_span():
@@ -559,6 +562,8 @@ def test_a_gene_spanning_three_shards_is_printed(tmp_path: Path, capsys: pytest.
     printed = capsys.readouterr().out
     assert "ENSG00000000002 LONG (100-2600) spans 3 shards and stays open across 1_1000, 1001_2000, 2001_3000" in printed
     assert "chr21: 1 gene spans 3 or more shards" in printed
+    assert "chr21 shard 1_1000: variants 1, assigned 1, gene rows 0, still open 1" in printed
+    assert "chr21 shard 2001_3000: variants 1, assigned 1, gene rows 1, still open 0" in printed
     assert "EARLY" not in printed
     rows = _rows(output_dir / "chr21" / "inherited.gene_scores.tsv")
     assert [row["gene_name"] for row in rows] == ["LONG"]

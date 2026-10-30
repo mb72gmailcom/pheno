@@ -474,9 +474,10 @@ class GeneScores:
         records: list[tuple[int, str, str, str, dict[str, int]]],
         loaded: dict[tuple[str, str], np.ndarray] | dict[tuple[str, str, str, str], np.ndarray],
         shard: str = "",
-    ) -> None:
+    ) -> int:
+        """Add shard variants. Return how many fell inside at least one gene."""
         if not records or not self.intervals:
-            return
+            return 0
         records.sort(key=lambda item: (item[0], item[2], item[3]))
         assigned = _genes_at([pos for pos, _text, _ref, _alt, _dosages in records], self.intervals)
         width = len(self.source.columns)
@@ -510,6 +511,7 @@ class GeneScores:
                         current = np.zeros(width, dtype=np.float64)
                         bucket[person] = current
                     current += dosage * values
+        return sum(1 for gene_ids in assigned if gene_ids)
 
     def emit(self, before: int | None) -> list[dict[str, object]]:
         """Write genes that end before ``before``. ``None`` writes every gene still open."""

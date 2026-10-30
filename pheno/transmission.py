@@ -9,6 +9,7 @@ from collections import defaultdict
 from fractions import Fraction
 from itertools import combinations
 from pathlib import Path
+from typing import TextIO
 
 from scipy.stats import norm
 
@@ -326,7 +327,7 @@ def _process_score_shards(
     written = 0
     gene_written = 0
     fields = score_fieldnames(score_source.columns)
-    open_scores: dict[str, tuple[object, csv.DictWriter]] = {}
+    open_scores: dict[str, tuple[TextIO, csv.DictWriter]] = {}
     debug = debug or GeneDebug(None)
     try:
         for chrom, shards in plan:
@@ -351,14 +352,15 @@ def _process_score_shards(
             for index, (sites_path, shard, start, end) in enumerate(shards):
                 records.clear()
                 _read_site_file(sites_path, seen, pending, records, people, members, fcap, True)
+                assigned = 0
                 if records:
-                    running.add(
+                    assigned = running.add(
                         records,
                         _load_shard_scores(score_source, chrom, shard, records),
                         f"{start}_{end}",
                     )
                 next_start = shards[index + 1][2] if index + 1 < len(shards) else None
-                gene_written += _append_score_rows(
+                n_rows = _append_score_rows(
                     chrom,
                     running.emit(None if next_start is None else next_start),
                     fields,
@@ -367,9 +369,16 @@ def _process_score_shards(
                     score_writer,
                     open_scores,
                 )
+                gene_written += n_rows
                 if debug.gene_id and debug.gene_id in running.counts and next_start is not None:
                     debug.still_open(f"{start}_{end}", running.reach.get(debug.gene_id, -1), next_start)
+                print(
+                    f"{chrom} shard {start}_{end}: variants {len(records)}, assigned {assigned}, "
+                    f"gene rows {n_rows}, still open {len(running.counts)}",
+                    flush=True,
+                )
             debug.end_chromosome(chrom)
+            _close_score_file(open_scores, chrom)
             variants, _gene_rows = _flush_chromosome(
                 chrom,
                 pending,
@@ -411,6 +420,15 @@ def _load_shard_scores(
     return _load_seqweaver(shard, score_source.columns, needed_labels)
 
 
+def _close_score_file(open_scores: dict[str, tuple[TextIO, csv.DictWriter]], chrom: str) -> None:
+    """Close this chromosome's gene-score file before the next chromosome starts."""
+    opened = open_scores.pop(chrom, None)
+    if opened is None:
+        return
+    handle, _writer = opened
+    handle.close()
+
+
 def _append_score_rows(
     chrom: str,
     rows: list[dict[str, object]],
@@ -418,7 +436,7 @@ def _append_score_rows(
     prefix: str,
     output_dir: Path | None,
     score_writer: csv.DictWriter | None,
-    open_scores: dict[str, tuple[object, csv.DictWriter]],
+    open_scores: dict[str, tuple[TextIO, csv.DictWriter]],
 ) -> int:
     if not rows:
         return 0
@@ -430,7 +448,9 @@ def _append_score_rows(
             chrom_writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
             chrom_writer.writeheader()
             open_scores[chrom] = (handle, chrom_writer)
-        open_scores[chrom][1].writerows(rows)
+        handle, chrom_writer = open_scores[chrom]
+        chrom_writer.writerows(rows)
+        handle.flush()
     elif score_writer is not None:
         score_writer.writerows(rows)
     return len(rows)
