@@ -24,6 +24,7 @@ pheno-asd-burden = "pheno.cli_burden:main"
 pheno-asd-burden-gene = "pheno.cli_gene_burden:main"
 pheno-asd-transmission = "pheno.cli_transmission:main"
 pheno-model-stats = "pheno.cli_model_stats:main"
+pheno-tss = "pheno.cli_tss:main"
 
 [build-system]
 requires = ["setuptools>=68"]
