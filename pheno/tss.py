@@ -358,11 +358,11 @@ def _distance(strand: str, tss: int, start: int, end: int) -> int:
     return start - tss
 
 
-def _write_table(path: Path, rows: list[list[object]]) -> None:
+def _write_table(path: Path, rows: list[list[object]], fields: tuple[str, ...] = _FIELDS) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(_FIELDS)
+        writer.writerow(fields)
         writer.writerows(rows)
     temporary.replace(path)
